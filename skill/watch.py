@@ -3,7 +3,7 @@
 """值班循环：一直挂在 wxtest 上领任务，手里永远只拿一条。
   python3 watch.py          常驻（已有一份在跑就直接退出，可反复调用来「保活」）
   python3 watch.py setup    一键上岗：停旧值班（run_loop.sh/watch_loop.sh、crontab 里的开班）→ 装 systemd（装不上就算了）→ 拉起 → 自检，最后打印平台 hook 要填的那一行
-  python3 watch.py hook     平台 hook 每 10 秒跑这一句：保活（up）+ 有任务就打印（next），没任务什么都不输出；在哪个目录调用都行
+  python3 watch.py hook     平台 hook 每 10 秒跑这一句：保活（up）+ 新任务打印一次（REMIND 秒后还在再打印一次），其余时候什么都不输出；在哪个目录调用都行
   python3 watch.py install  装成 systemd 用户服务（挂了 5 秒自动拉起、开机自启），装不上会说明改用 hook
   python3 watch.py up       保活：没在跑就脱离当前会话在后台拉起一份（setsid），在跑就什么都不做
   python3 watch.py next     打印最早一条待处理任务（没有就什么都不输出）
@@ -17,6 +17,7 @@ import db, psync
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 INBOX = os.path.join(HERE, "inbox")
+REMIND = 240        # hook 同一条只叫醒一次，这么久还没处理再提醒一次（每 10 秒都打印会把平台唤醒放大 33 倍，处理员排队几小时）
 STALE = 330          # 超过 wxtest 的单条上限（300 秒）还没处理完：wxtest 已收回改派别人，本地这份作废，丢掉接着领
 
 def log(m):
@@ -44,12 +45,24 @@ def wake(tid, path):
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10,
                            env=dict(os.environ, AWX_TASK_ID=tid, AWX_TASK_FILE=path))
         if r.returncode: log(f"[wake] 退出码 {r.returncode}：{(r.stderr or r.stdout).strip()[:200]}")
+        else: mark(tid)                        # 叫醒过了，hook 不再重复叫
     except Exception as e:
         log(f"[wake] {e}")
 
+def shown(tid):   # inbox/.<ID>.shown：已经叫醒过几次（内容）、最后一次什么时候（mtime）
+    return os.path.join(INBOX, f".{tid}.shown")
+
+def mark(tid):
+    p = shown(tid)
+    try: n = int(open(p).read() or 0)
+    except (OSError, ValueError): n = 0
+    open(p, "w").write(str(n + 1))
+
 def done(tid):
-    try: os.remove(os.path.join(INBOX, f"{os.path.basename(tid).removesuffix('.json')}.json"))
-    except OSError: pass
+    tid = os.path.basename(tid).removesuffix(".json")
+    for p in (os.path.join(INBOX, f"{tid}.json"), shown(tid)):
+        try: os.remove(p)
+        except OSError: pass
 
 LOCK = os.path.join(HERE, "watch.lock")
 UNIT = "awx-watch.service"
@@ -187,7 +200,7 @@ def step(c):
     if p:
         if time.time() - os.path.getmtime(p[0]) > STALE:
             log(f"[watch] {os.path.basename(p[0])} 超过 {STALE} 秒没处理完（wxtest 已收回改派），丢弃；请查处理员为什么没处理")
-            os.remove(p[0]); return
+            done(p[0]); return
         db.meta_set(c, "tick_at", str(int(time.time())))   # 手里有活，心跳别退
         time.sleep(2); return
     maybe_urgent(c)
@@ -200,8 +213,14 @@ def step(c):
     if r.stdout.strip(): save(r.stdout.strip())
     if r.returncode: log(f"[watch] tick.py 退出码 {r.returncode}"); time.sleep(5)
 
-def main_next():
+def main_next(hook=False):
     p = pending()
+    if p and hook:                             # hook：同一条只给一次，REMIND 秒后还在再给一次，之后不再给（330 秒丢弃）
+        tid = os.path.basename(p[0])[:-5]
+        try: n, ago = int(open(shown(tid)).read() or 0), time.time() - os.path.getmtime(shown(tid))
+        except (OSError, ValueError): n, ago = 0, 0
+        if n >= 2 or (n == 1 and ago < REMIND): return
+        mark(tid)
     if p:
         print(json.dumps({"id": os.path.basename(p[0])[:-5], **json.load(open(p[0], encoding="utf-8"))}, ensure_ascii=False))
 
@@ -216,7 +235,7 @@ def main():
     elif a[0] == "up":
         up()
     elif a[0] == "hook":
-        up(); main_next()
+        up(); main_next(hook=True)
     elif a[0] == "setup":
         sys.exit(setup())
     elif a[0] == "install":

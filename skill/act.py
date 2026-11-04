@@ -4,7 +4,7 @@
 JSON 可含 "profile"（画像，写库）和 "intent" + "reply"（回复）。
 技术问题要联网查时先写 {"intent": "tech", "wait": "稍等的话"}：这里先把稍等发出去、任务不交，查完再跑一次同样的命令交正式回复。发不发、发草稿还是只通知，按风险表由这里决定，不由 Muse 决定。
 定下来的结论交回 wxtest：要发的回复（send）和给本人的通知（notify）由 wxtest 去发，发不出它自己重试，这里不等。"""
-import json, sys
+import json, sys, time
 import awx, db, reply_rules as rr, sns, voices, watch
 
 
@@ -33,17 +33,36 @@ def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     chat, args = sys.argv[1], sys.argv[2:]
+    tid = args[args.index("--task") + 1] if "--task" in args else None
+    c = db.conn(); db.init(c)
+    waited = db.meta_json(c, "task:" + chat, {}).get("waited")
+    chk = tid and not waited and awx.task_check(tid)   # 已回过稍等的照旧做完（被收回了下面补发，有没有人回过由 wxtest 在发送锁里把关）
+    if chk and not chk["mine"]:        # 早被收回、别台处理过或已作废（处理员晚了几小时才跑）：什么都不动，画像、标签、草稿、稍等都不写不发
+        print(f"[task] {tid} 已不是本机的（{chk['status']}，{chk['agent']}），不处理", flush=True)
+        watch.done(tid); return
     out = run(chat, "--media" in args, args[args.index("--sns") + 1] if "--sns" in args else None)
     if out is None:                    # 只发了「稍等」，任务留在手里，查完再跑一次
         return
-    if "--task" in args:               # 回复任务：结论交回 wxtest；批量画像没有 --task，只写画像
-        tid = args[args.index("--task") + 1]
-        r = awx.task_done(tid, out)
-        watch.done(tid)                # 交了（或被拒）就从值班收件箱删掉，watch.py 接着领下一条
-        snd = out.get("send")
-        if r is None and snd and out.get("waited"):   # 查资料超过 5 分钟、任务被收回：重派的任务会因为已回过稍等而跳过，这里自己补发
-            ok, st, _ = awx.send(chat, snd["text"], db.config(db.conn())["me_id"], snd["group"], reply_to=snd["reply_to"])
-            print(f"[send] 任务已收回，直接补发：{st}", flush=True)
+    draft = out.pop("draft", None)
+    if "--task" not in args:           # 批量画像没有 --task：不交结论，草稿直接存
+        if draft: db.add_draft(db.conn(), chat, *draft)
+        return
+    r = awx.task_done(tid, out)
+    watch.done(tid)                    # 交了（或被拒）就从值班收件箱删掉，watch.py 接着领下一条
+    ok = bool(r and r.get("ok"))
+    if not ok:
+        print(f"[task] {tid} 结论没交上：{(r or {}).get('error', '连不上')}，现状 {(r or {}).get('status')}（{(r or {}).get('agent')}）", flush=True)
+    if ok:                             # 问过 AI 补标签/备注：交上了才算问过（3 天内不再问），没交上下次照问
+        c = db.conn()
+        for k in db.meta_json(c, "task:" + chat, {}).get("ask") or []:
+            db.meta_set(c, f"{k}:{chat}", str(int(time.time())))
+    if draft:
+        if ok: db.add_draft(db.conn(), chat, *draft)
+        else: print(f"[draft] {tid} 草稿不存", flush=True)
+    snd = out.get("send")
+    if not ok and snd and out.get("waited"):   # 查资料超过 5 分钟、任务被收回：重派的会因已回过稍等而跳过，这里自己补发；稍等之后已有人回过，wxtest 发送锁里会挡掉（reply_to）
+        ok, st, _ = awx.send(chat, snd["text"], db.config(db.conn())["me_id"], snd["group"], reply_to=snd["reply_to"])
+        print(f"[send] 任务已收回，直接补发：{st}", flush=True)
 
 def run(chat, media, sns_ref=None):
     """返回交给 wxtest 的结论：{"result": {...}, "send": {...}, "notify": "...", "notify_if_sent": "..."}。"""
@@ -101,7 +120,7 @@ def run(chat, media, sns_ref=None):
             out["notify_if_sent"] = note(f"{name} 问技术：「{said}」，AI 已代答「{text}」，你可以看一眼。")
         print(f"[send] {name} -> {text!r}", flush=True)
     elif act == "draft":
-        db.add_draft(c, chat, name, text)
+        out["draft"] = (name, text)    # 交结论成功才写本地草稿（main），被拒的任务别留下没人要的草稿
         out["notify"] = note(f"{name}：「{said}」→ 草稿「{text}」，没发。")
     elif act == "notify":
         out["notify"] = note(f"{name} 说了需要你亲自处理的事：「{said}」，AI 没回。" if not tk.get("waited") else

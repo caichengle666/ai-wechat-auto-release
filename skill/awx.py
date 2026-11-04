@@ -170,10 +170,19 @@ def api(path, body=None, timeout=30, tries=6, waits=20):
             print(f"[awx] {path} 第 {i + 1} 次没收全，重试：{str(e)[:80]}", file=sys.stderr, flush=True)
             time.sleep(i); i += 1   # 头一次断了立刻重来
 
-def task_done(tid, body):
-    """把任务结论交回 wxtest；租约已被收回（409）或网络错误都不要紧，wxtest 会再派。"""
+def task_check(tid):
+    """这条任务还算不算本机的：{mine, status, agent}；连不上或 wxtest 太旧（没这个接口）回 None，调用方照旧往下做。"""
     try:
-        return api(f"/task/{tid}", body, timeout=20)
+        r = api(f"/task?id={urllib.parse.quote(tid)}", timeout=15, tries=2)
+        return r if isinstance(r, dict) and "mine" in r else None
+    except Exception as e:
+        print(f"[task] 查 {tid} 状态失败：{str(e)[:80]}", file=sys.stderr, flush=True)
+
+def task_done(tid, body):
+    """把任务结论交回 wxtest；租约已被收回（409）或网络错误都不要紧，wxtest 会再派。
+    交上回 {"ok": true}；409 回 wxtest 的说明（含 status、agent：已被谁处理）；网络错误回 None。"""
+    try:
+        return _post(f"/task/{tid}", body, 20)
     except Exception as e:
         print(f"[task] {tid} {e}", file=sys.stderr, flush=True)
 

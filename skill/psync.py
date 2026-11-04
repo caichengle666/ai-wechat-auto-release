@@ -53,7 +53,7 @@ def _now_hash(c, key):
 def _settings_file():
     return os.environ.get("AWX_SETTINGS") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 
-def _apply_settings(c, data, log):
+def _apply_settings(c, data, log, who="别台"):
     """别台改的共用设置：写进本机 meta，同时改 settings.json（不然本机下次跑 seed.py 会把旧值又推回去）。各机自留的项不动。"""
     st = {k: str(v) for k, v in data.items() if k in db.SETTING_KEYS and k not in db.LOCAL_KEYS}
     for k, v in st.items(): db.meta_set(c, k, v)
@@ -68,9 +68,14 @@ def _apply_settings(c, data, log):
         tmp = f + ".sync"
         with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as fh: json.dump(raw, fh, ensure_ascii=False, indent=2)
         os.replace(tmp, f)
-        log(f"[psync] 别台改了设置 {','.join(sorted(ch))}，本机 settings.json 已跟着改")
+        log(f"[psync] {who}改了设置 {','.join(sorted(ch))}，本机 settings.json 已跟着改")
     except (OSError, ValueError) as e:
         log(f"[psync] 改 settings.json 失败（meta 已改，跑 seed.py 前先手动对一下）：{e}")
+
+def set_mine(c, key, val, log):
+    """本人在文件传输助手改的共用设置：写 meta 和 settings.json，马上同步给别台（wxtest 下一轮 /filter 拿到）。"""
+    _apply_settings(c, {key: val}, log, who="本人")
+    db.meta_set(c, "psync_urgent", "1")
 
 def dirty(c):
     """本机改过、还没推的：[{key, base, data} 或 {key, base, deleted}]。"""

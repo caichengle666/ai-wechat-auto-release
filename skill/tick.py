@@ -100,9 +100,17 @@ _GRP = [("只回@", "reply_when", "mention"), ("全回", "reply_when", "all"), (
 
 # 菜单：发「菜单」弹出编号，回数字；要名字的再回名字，等于发「前缀+名字」。
 _MENU = [("AI 暂停（全部不回）", "AI暂停"), ("AI 恢复", "AI恢复"), ("某人不回", "不回"), ("某人只存草稿", "草稿"),
-         ("某人直接回", "直发"), ("解封某人", "解封"), ("某群全回", "全回"), ("某群只回@", "只回@"), ("某群不回", "群不回")]
+         ("某人直接回", "直发"), ("解封某人", "解封"), ("某群全回", "全回"), ("某群只回@", "只回@"), ("某群不回", "群不回"),
+         ("AI 接管等待时间（你在聊时）", "接管")]
+HANDOFF_MAX = 240
+
+def handoff_help(cfg):
+    return (f"接管等待，现在是 {cfg['handoff_min']} 分钟：\n"
+            f"你自己正在某个聊天里聊着时，对方再发消息，你 {cfg['handoff_min']} 分钟内没回，AI 才替你接着回；这期间对方的消息不会丢。\n"
+            "想 AI 晚点插嘴就调大，想对方少等就调小。很久没在那个聊天说话时不受影响，AI 照常马上回。")
 MENU_TTL = 600
-GUIDE_WORDS = ("教程", "使用教程", "使用说明", "说明书")
+GUIDE_WORDS = ("教程", "使用教程", "使用说明", "说明书", "文档", "guide")
+MENU_WORDS = ("菜单", "命令", "指令", "帮助", "用法", "怎么用", "功能", "help", "menu", "?", "？")   # 不分大小写
 GUIDE_PIECE = 1500        # 教程按段落拼成每条不超过这么多字，分几条发（wxtest 全局两条至少隔 15 秒）
 
 def guide_pieces(path=None):
@@ -128,11 +136,14 @@ def _menu(c, cfg, t):
     """处理菜单交互，返回要执行的命令文本（None=这条已处理完或不是菜单）。"""
     st = db.meta_json(c, "menu", {})
     fresh = time.time() - st.get("t", 0) < MENU_TTL
-    if t in ("菜单", "命令", "帮助", "?", "？"):
+    if t.lower() in MENU_WORDS:
         db.meta_set(c, "menu", json.dumps({"t": int(time.time())}))
         say(cfg, "回数字选命令：\n" + "\n".join(f"{i}. {x}" for i, (x, _) in enumerate(_MENU, 1)) + "\n完整使用说明发「教程」")
         return None
-    known = [x for _, x in _MENU] + [x for x, _, _ in _CMDS] + ["AI", "标签", "拍", "备注", "语音", "退回画像", *GUIDE_WORDS]
+    known = [x for _, x in _MENU] + [x for x, _, _ in _CMDS] + ["AI", "标签", "拍", "备注", "语音", "退回画像", "接管", *GUIDE_WORDS]
+    if fresh and st.get("pre") == "接管 " and t.isdigit():                  # 等分钟数
+        db.meta_set(c, "menu", json.dumps({"t": int(time.time())}))
+        return "接管 " + t
     if fresh and st.get("pre") and not t.isdigit() and not any(t.upper().startswith(k) for k in known):   # 等名字
         db.meta_set(c, "menu", json.dumps({"t": int(time.time())}))   # 菜单还有效，可接着回下一个数字
         return st["pre"] + t
@@ -141,6 +152,10 @@ def _menu(c, cfg, t):
         if cmd in ("AI暂停", "AI恢复"):
             db.meta_set(c, "menu", json.dumps({"t": int(time.time())}))
             return cmd
+        if cmd == "接管":
+            db.meta_set(c, "menu", json.dumps({"t": int(time.time()), "pre": "接管 "}))
+            say(cfg, handoff_help(cfg) + f"\n回分钟数改（1~{HANDOFF_MAX}），如 30")
+            return None
         db.meta_set(c, "menu", json.dumps({"t": int(time.time()), "pre": cmd}))
         say(cfg, f"「{label}」：回{'群' if '群' in label else ''}名字（备注或昵称里的几个字就行）")
         return None
@@ -163,7 +178,7 @@ def commands(c, cfg, lead=True):
         t = _menu(c, cfg, t)
         if not t:
             continue
-        if t in GUIDE_WORDS:                       # 使用教程：只让回话的那个 agent 发
+        if t.lower() in GUIDE_WORDS:               # 使用教程：只让回话的那个 agent 发
             if lead: guide(cfg)
             continue
         if t[:2].upper() == "AI":                  # ai恢复 / Ai暂停 都认
@@ -171,6 +186,17 @@ def commands(c, cfg, lead=True):
         if t in ("AI暂停", "AI恢复"):
             db.meta_set(c, "paused", "1" if t == "AI暂停" else "")
             say(cfg, "AI 已" + ("暂停" if t == "AI暂停" else "恢复"))
+            continue
+        if t.startswith("接管"):                   # 接管 30：本人在聊时对方再说话，几分钟没回 AI 才接（共用设置 handoff_min）
+            n = t[2:].strip().replace("分钟", "").replace("分", "")
+            if not n:
+                say(cfg, handoff_help(cfg) + f"\n改：发「接管 30」（1~{HANDOFF_MAX} 分钟）"); continue
+            if not n.isdigit() or not 1 <= int(n) <= HANDOFF_MAX:
+                say(cfg, f"格式：接管 分钟数（1~{HANDOFF_MAX}），如「接管 30」"); continue
+            if lead:                               # 只让回话的那台改，别台走设置同步
+                psync.set_mine(c, "handoff_min", n, lambda x: print(x, file=sys.stderr, flush=True))
+                cfg["handoff_min"] = int(n)
+                say(cfg, f"好的，接管等待改成 {n} 分钟：你在聊时对方再发消息，你 {n} 分钟没回 AI 才接")
             continue
         done = False
         for pre, field, val in _GRP:   # 群命令优先（含 @）
@@ -313,8 +339,9 @@ def digest_task(c, cfg):
             seen.add(s["username"])
             try:
                 msgs = [m for m in awx.messages(s["username"], 200) if m.get("time", 0) >= since]
-            except Exception:
-                continue
+            except Exception as e:
+                print(f"[摘要] 读 {s.get('name') or s['username']} 失败：{e}", file=sys.stderr, flush=True)
+                parts.append(f"【{s.get('name') or s['username']}】消息读取失败，今天没摘要"); continue
             if msgs:
                 parts.append(f"【{s.get('name') or s['username']}】{len(msgs)} 条\n"
                              + awx.transcript(msgs, cfg["me_id"], cfg["me"] or cfg["title"], each=300, total=6000))
@@ -328,12 +355,12 @@ def digest_task(c, cfg):
                            "开头写「【群摘要】」，只总结，不替本人回复或报价。这次不是 JSON：直接把摘要正文用 heredoc 喂给 act 命令。",
             "act": f"python3 say.py {cfg['notify_to']}"}
 
-def _remember(c, chat, recent, cfg, voice=None):
+def _remember(c, chat, recent, cfg, voice=None, ask=()):
     """回的是哪条、对方说了什么、要不要用语音回（用谁的声音），留给 act.py，它就不用再读一遍消息。"""
     rid = next((m["id"] for m in reversed(recent) if m.get("sender_id") != cfg["me_id"]), None)
     said = next(((m.get("content") or "")[:60] if m.get("type") == 1 else "[非文字]"
                  for m in reversed(recent) if m["id"] == rid), "")
-    db.meta_set(c, "task:" + chat, json.dumps({"rid": rid, "said": said, "voice": voice}, ensure_ascii=False))
+    db.meta_set(c, "task:" + chat, json.dumps({"rid": rid, "said": said, "voice": voice, "ask": list(ask)}, ensure_ascii=False))
 
 def _build(c, chat, name, cfg, recent, new, tags=(), remark=None, called=False):
     # 机器人对聊、刷屏、勿回、拍一拍、本人在聊、群里没叫到本人：wxtest 派任务前已经处理掉了
@@ -419,14 +446,12 @@ def _build(c, chat, name, cfg, recent, new, tags=(), remark=None, called=False):
         t["instruction"] += ("\n另外这个人还没有" + "和".join(x for x, y in (("微信标签", lab), ("备注", rmk)) if y)
                              + "，你自己判断要不要补：要补就在回复的 JSON 顶层加对应字段，不补就不加。"
                              + (persona.label_help(cfg, awx.all_labels()) if lab else "") + (persona.REMARK_HELP if rmk else ""))
-        if lab: db.meta_set(c, "labelask:" + chat, str(int(time.time())))
-        if rmk: db.meta_set(c, "remarkask:" + chat, str(int(time.time())))
+        t["_ask"] = [k for k, y in (("labelask", lab), ("remarkask", rmk)) if y]   # 结论交上了 act 才记「问过」，任务过期下次照问
     if p:
         t["instruction"] += ("\n另外这个人还没画像（或画像过期）：先读 history 给 TA 画像，结果放进同一个 JSON 的 \"profile\" 字段，"
                              "回复按新画像来。\n" + persona.FIELDS_HELP.format(title=cfg["title"])
                              + (persona.label_help(cfg, awx.all_labels()) if lab else "") + (persona.REMARK_HELP if rmk else ""))
-        if lab: db.meta_set(c, "labelask:" + chat, str(int(time.time())))
-        if rmk: db.meta_set(c, "remarkask:" + chat, str(int(time.time())))
+        t["_ask"] = [k for k, y in (("labelask", lab), ("remarkask", rmk)) if y]   # 结论交上了 act 才记「问过」，任务过期下次照问
         t["history"] = (p["history"] + (f"\n\n{cfg['title']}给 TA 打的微信标签（身份/行业，画像以它为准）：{'、'.join(tags)}" if tags else "")
                         + (f"\n\nTA 最近的朋友圈（画像时参考 TA 在忙什么、关心什么）：\n{feeds}" if feeds else ""))
     return t
@@ -537,7 +562,7 @@ def run(c, cfg):
     if not task:
         awx.task_done(t["id"], {"result": {"action": "none"}, **notes()} if NOTES else {"skip": "不用回"})
         return
-    _remember(c, chat, recent, cfg, task.pop("voice", None))
+    _remember(c, chat, recent, cfg, task.pop("voice", None), task.pop("_ask", ()))
     task["act"] += f" --task {t['id']}"
     print(json.dumps({"tasks": [task]}, ensure_ascii=False))
 
