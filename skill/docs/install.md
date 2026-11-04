@@ -8,9 +8,11 @@
 > 2. 一部登着你微信的手机：第一次要扫码，以后容器重启要在手机上点确认。
 > 3. 外网地址（AI 和微信不在一台机器）：推荐一个 Cloudflare 免费账号 + 一个托管在 Cloudflare 的域名，做固定地址；没有也行，会用临时地址，但每次重启会变。
 > 可选功能（要哪个准备哪个）：
-> 4. 语音（对方发语音，AI 回语音）：二选一或都要
+> 4. 语音（对方发语音，AI 回语音）：主用的从 Fish 或其他平台里选一个，Cloudflare 默认加上当备用（主用的不通自动换它；不想要可以说不要）
 >    - Fish Audio API key（fish.audio 注册）：可以克隆你自己的声音、多个声音；免费模型有期限（目前到 2026-11-30），之后要付费或改用 Cloudflare。
->    - Cloudflare 免费账号：免费、不用绑卡，但只有一种标准女声，不能克隆。两个都配时 Fish 优先，Cloudflare 兜底。
+>    - 其他语音平台（通用接口）：任何兼容 OpenAI 语音接口的平台都行（如 OpenAI、硅基流动），自己在平台上拿 key、选模型和音色；所有人都用这一个音色，不能克隆。
+>    - Cloudflare 免费账号：免费、不用绑卡，但只有一种标准女声，不能克隆。
+>    顺序是 Fish → 其他平台 → Cloudflare，前一个不通自动换下一个。只想用免费的，只配 Cloudflare 也行。
 > 5. 看懂视频（好友发视频，AI 听完再聊）：一个谷歌账号，能打开 notebooklm.google.com；还要一台有浏览器的电脑登录一次导出登录文件。不配的话只看画面截图。
 > 6. 掉线告警发到手机（可选）：Bark、邮箱或 webhook 地址，见 `docs/settings.md` 的 `alert`。
 
@@ -68,7 +70,7 @@ python3 install.py
 - 令牌等于微信控制权，别贴到公开地方；公网访问也必须带令牌。
 
 ### 语音（用户第零步勾了才配，不要就跳过，并把设置 `voice_reply` 改成 off）
-两种服务，按用户选的配一个或两个；两个都配时 Fish 永远优先、Cloudflare 兜底，只配 Cloudflare 也能用。key、令牌都只存在微信那台的数据目录，不进 skill 文件，用完从对话里忘掉。
+主用的按用户选的配（A Fish 或 B 通用接口，也可以都不要）；C Cloudflare 默认都配上当备用，用户明确说不要才跳过。顺序固定 Fish → 通用接口 → Cloudflare，前一个不通自动换下一个，只配哪一个都能用。不想要某一种：`awx.api('/tts',{'drop':'fish'})`（`oai`、`cf` 同理）。key、令牌都只存在微信那台的数据目录，不进 skill 文件，用完从对话里忘掉。
 
 #### A. Fish Audio（能克隆声音、多个声音）
 把这段原样发给用户：
@@ -81,7 +83,14 @@ python3 -c "import awx,json;print(json.dumps(awx.api('/tts',{'fish_key':'用户�
 ```
 `GET /tts` 看到 `https://api.fish.audio` 即成功。代码不带任何自带声音（没克隆前是 Fish 默认音色）；把 `docs/voice.md` 原样发给用户，照着做就能克隆成 TA 自己的声音（wxtest 自己克隆，会回一条试听）。
 
-#### B. Cloudflare（免费、只有一种标准女声、不能克隆）
+#### B. 其他语音平台（通用接口，兼容 OpenAI 语音格式的都行）
+问用户用哪家，让 TA 在那家后台拿四样东西发给你：接口地址（写到 `/v1` 这一级，如 `https://api.openai.com/v1`）、API key、语音模型名、音色名（各家写法不同，以那家文档为准，你可以帮 TA 查）。拿到后：
+```bash
+python3 -c "import awx,json;print(json.dumps(awx.api('/tts',{'oai_url':'地址','oai_key':'key','oai_model':'模型','oai_voice':'音色'}),ensure_ascii=False))"
+```
+wxtest 保存后当场合成一句试：回 `"ok": true` 带 `合成成功 N 秒` 即成功；`"ok": false` 时 `error` 里是平台原话（key 错、模型名或音色名不对），照着让用户改了再跑一次。所有声音都用这一个音色、不能克隆，`docs/voice.md` 里的克隆命令只对 Fish 有效，跟用户说清楚。
+
+#### C. Cloudflare（免费、只有一种标准女声、不能克隆）
 把这段原样发给用户：
 > 1. 打开 https://dash.cloudflare.com 注册/登录（免费账号就行，不用绑卡）。
 > 2. 左边菜单「管理账户」→「账户 API 令牌」→「创建令牌」。
@@ -94,7 +103,7 @@ CF_TOKEN='用户给的令牌' python3 cftts.py
 ```
 它在用户账号部署 Worker `wxtts`、生成专用密钥、告诉 wxtest（`POST /tts`）。报权限错就让用户按第 2~4 步重建。`GET /tts` 能看到 workers.dev 地址即成功。
 
-两个都不通时，自动回复的语音改发文字，不会发不出去。
+都不通时，自动回复的语音改发文字，不会发不出去。
 
 ### 看懂视频：NotebookLM（用户第零步勾了才配）
 有人声的视频交给 NotebookLM 听完回答；不配也能用，只是改看画面截图。把这段原样发给用户（要在**有浏览器的电脑**上做，Windows、Mac、Linux 都行）：

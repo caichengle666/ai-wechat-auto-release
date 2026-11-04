@@ -76,9 +76,23 @@ def release(tid, why, retry=False):
     if r is not None: done(tid)                # 交上了或已不是本机的（409）都删；连不上留着，STALE 兜底
     return r
 
+def gone(tid):    # inbox/.<ID>.gone：wxtest 说这条已不归本机（本人接管、别台接手），内容是原因；act.py 看到就打印原因收手
+    return os.path.join(INBOX, f".{tid}.gone")
+
+def stop(tid, why):
+    """心跳得知这条已不归本机：从收件箱拿掉（hook 不再叫醒、值班接着领），原因留给还在跑的处理员看。"""
+    tid = os.path.basename(str(tid or "")).removesuffix(".json")
+    if not tid or not os.path.exists(os.path.join(INBOX, f"{tid}.json")): return
+    try: open(gone(tid), "w", encoding="utf-8").write(why or "已不归本机")
+    except OSError as e: log(f"[watch] 记不下 {tid} 作废原因：{e}")
+    for p in (os.path.join(INBOX, f"{tid}.json"), shown(tid)):
+        try: os.remove(p)
+        except OSError: pass
+    log(f"[watch] {tid} 已不归本机，叫停：{why}")
+
 def done(tid):
     tid = os.path.basename(tid).removesuffix(".json")
-    for p in (os.path.join(INBOX, f"{tid}.json"), shown(tid), started(tid)):
+    for p in (os.path.join(INBOX, f"{tid}.json"), shown(tid), started(tid), gone(tid)):
         try: os.remove(p)
         except OSError: pass
 
@@ -249,7 +263,8 @@ def main_next(hook=False):
 
 MUST = ("必须以执行 tasks 里的 act 命令收尾（不回也交 {{}}），不要只给主会话或本人写汇报；"
         "读不到内容或被平台拦下就马上执行 python3 watch.py release {id} 原因，交给别台；"
-        "不要自己发通知给本人（看不到原文只能报编号），wxtest 会带原文告诉本人")
+        "不要自己发通知给本人（看不到原文只能报编号），wxtest 会带原文告诉本人；"
+        "act 打印「已不是本机的」（本人已接管、别台接手、已作废）就直接结束，不要汇报「没回成」")
 
 def main():
     a = sys.argv[1:]
