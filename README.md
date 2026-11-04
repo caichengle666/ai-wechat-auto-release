@@ -1,6 +1,6 @@
 # ai-wechat-auto
 
-这里只放安装说明、编译好的镜像和 AI 用的 skill，源码不公开。镜像：[ghcr.io/caichengle666/ai-wechat-auto-bin](https://github.com/users/caichengle666/packages/container/package/ai-wechat-auto-bin)（x86_64 / arm64）。
+这里只放安装说明、编译好的镜像和 AI 用的 skill。镜像：[ghcr.io/caichengle666/ai-wechat-auto-bin](https://github.com/users/caichengle666/packages/container/package/ai-wechat-auto-bin)（x86_64 / arm64）。
 
 把电脑版微信装进 Docker，让你自己的 AI 助理（Muse 等）帮你看消息、回消息。微信和 AI 不在同一台机器上。
 
