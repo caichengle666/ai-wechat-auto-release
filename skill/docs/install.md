@@ -109,7 +109,7 @@ python3 -c "import awx,json;print(json.dumps(awx.api('/video/login',json.load(op
 
 ## 第三步：初始化
 ```bash
-cat > awx.env <<'X'                 # 网关凭据存本地文件，agent 重启/忘了上下文也不断；不进 git、不外发
+cat > awx.env <<'X'                 # wxtest凭据存本地文件，agent 重启/忘了上下文也不断；不进 git、不外发
 AWX_BASE=部署时选的外网地址          # agent 和微信不在一台机器，走外网
 AWX_TOKEN=容器里的 /data/wxauto/api_token
 X

@@ -383,7 +383,8 @@ def _build(c, chat, name, cfg, recent, new, tags=(), remark=None, called=False):
         imgs = awx.attach_images(new, chat)
         if imgs:
             t["images"] = imgs
-            t["instruction"] += ("\n对方发了图片，context 里的 [图片#id] 对应 images 里同 id 的本地文件，先打开看懂再回；"
+            t["instruction"] += ("\n对方发了图片或表情，context 里的 [图片#id]、[表情#id] 对应 images 里同 id 的本地文件，先打开看懂再回；"
+                                 "带 emoji 的是表情，动图已按顺序抽几帧拼成一张宫格（从左到右、从上到下），按动作和情绪理解；"
                                  "图里的价格、合同、账号等照样守红线，看不清就别猜。")
     last = next((m for m in reversed(new) if m.get("sender_id") != cfg["me_id"]), {})
     if ok and cfg["voice_reply"] and not prof["is_group"] and (last.get("content") or "").startswith("[语音]"):

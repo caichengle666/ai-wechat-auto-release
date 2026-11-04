@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """公共：ai-wechat-auto 接口、防重发的发送、拼对话文本。
-网关地址和令牌：环境变量 AWX_BASE、AWX_TOKEN 优先，没有就读本目录 awx.env（600 权限、不进 git），
+wxtest地址和令牌：环境变量 AWX_BASE、AWX_TOKEN 优先，没有就读本目录 awx.env（600 权限、不进 git），
 这样 agent 重启或忘了上下文也不断线。"""
 import gzip, hashlib, http.client, json, os, re, shutil, socket, sqlite3, subprocess, sys, time, uuid, zlib, urllib.error, urllib.parse, urllib.request
 from urllib.parse import quote
@@ -15,7 +15,7 @@ def _creds():
             if k and v: kv[k] = v.strip().strip("'\"")
     b, t = os.environ.get("AWX_BASE") or kv.get("AWX_BASE"), os.environ.get("AWX_TOKEN") or kv.get("AWX_TOKEN")
     if not (b and t):
-        raise SystemExit("没有网关地址/令牌：问用户要，写进 awx.env（AWX_BASE=… 和 AWX_TOKEN=… 两行，chmod 600）")
+        raise SystemExit("没有wxtest地址/令牌：问用户要，写进 awx.env（AWX_BASE=… 和 AWX_TOKEN=… 两行，chmod 600）")
     return b.rstrip("/"), t
 
 BASE, TOKEN = _creds()
@@ -56,9 +56,9 @@ IID = _meta_once("agent_iid", lambda: uuid.uuid4().hex[:8])
 H = {"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json", "X-Agent": quote(AGENT), "User-Agent": "Mozilla/5.0 awx",
      "X-Agent-Id": IID, "X-Build": BUILD, "X-Host": quote(socket.gethostname())}
 
-PIECE = 1400   # 回包压缩后超过这么大就让 wxtest 切块（Muse 沙箱网关传途中随时断，11-03 实测 1.5KB 八九成能过、7KB 以上全断）
-PIECE_WAIT = 6   # 一块 1.4KB 正常半秒内到；但 24 路同时新建连接时网关建连可能要好几秒，2 秒太紧（11-03 0ac3045 实测块全卡在 3 秒超时），回到 6 秒
-PIECE_PAR = 4    # 取块几路并行：Muse 网关上同时开 24 路每块都要约 6 秒，单路复用连接每块 0.2 秒（11-03 实测）
+PIECE = 1400   # 回包压缩后超过这么大就让 wxtest 切块（Muse 沙箱出口传途中随时断，11-03 实测 1.5KB 八九成能过、7KB 以上全断）
+PIECE_WAIT = 6   # 一块 1.4KB 正常半秒内到；但 24 路同时新建连接时 Muse 出口建连可能要好几秒，2 秒太紧（11-03 0ac3045 实测块全卡在 3 秒超时），回到 6 秒
+PIECE_PAR = 4    # 取块几路并行：Muse 出口上同时开 24 路每块都要约 6 秒，单路复用连接每块 0.2 秒（11-03 实测）
 
 def _fetch(path, timeout, data, hdr, curl):
     """发一次请求，返回 (状态码, 响应头(小写键), 原始字节)；回包没收全就抛错。curl 走同一出口，有的沙箱只认它。"""
@@ -225,9 +225,9 @@ def set_labels(user, add=(), remove=(), ai=False, wait=0, remark=None):
     return call("/labels/set", {"items": [it]}, wait)
 
 def call(path, body, wait=300):
-    """慢操作（发送、语音转文字、朋友圈）走网关异步任务：提交立刻返回，再挂起等结果（每次最多 15 秒，做完立刻返回）。
+    """慢操作（发送、语音转文字、朋友圈）走wxtest异步任务：提交立刻返回，再挂起等结果（每次最多 15 秒，做完立刻返回）。
     agent 和微信一般不在一台机器，外网代理约 30 秒就断，所以不同步干等。wait=0 只提交不等（通知用）。
-    同一个 job id 断网重提交不会重做；查到 lost（做到一半网关重载了）、unknown 或超时就返回 None，由调用方查消息确认。"""
+    同一个 job id 断网重提交不会重做；查到 lost（做到一半wxtest重载了）、unknown 或超时就返回 None，由调用方查消息确认。"""
     body, end = dict(body, job=uuid.uuid4().hex), time.time() + wait
     call.last = None
     r = None
@@ -266,11 +266,11 @@ def _post(path, body, timeout):   # 409 等错误码也带 JSON（中止原因�
             raise e
 
 def sent(chat, text, me_id, n=10):
-    return any(m.get("sender_id") == me_id and (m.get("content") or "").endswith(text) for m in messages(chat, n))   # 网关可能在前面补了备注
+    return any(m.get("sender_id") == me_id and (m.get("content") or "").endswith(text) for m in messages(chat, n))   # wxtest可能在前面补了备注
 
 def send(chat, text, me_id, group=False, allow_draft=None, reply_to=None, wait=300):
-    """发一次，绝不盲目重发：拿不到结果（断网、网关重载）就查消息确认发没发出。
-    reply_to：回的是哪条消息；网关发现这条之后已有人回了（别的 agent 先回了，或本人亲自接话）就不发，返回 SKIP。
+    """发一次，绝不盲目重发：拿不到结果（断网、wxtest重载）就查消息确认发没发出。
+    reply_to：回的是哪条消息；wxtest发现这条之后已有人回了（别的 agent 先回了，或本人亲自接话）就不发，返回 SKIP。
     wait=0：只提交不等结果（通知用，不耽误主流程）。
     返回 (ok, 状态, 输入框里挡路的草稿或 None)。"""
     body = {"to": chat, "text": text, "allow_group": group}
@@ -314,7 +314,7 @@ def _img_clean():
 
 def image(chat, mid, thumb=True):
     """取一条图片消息解密后的图，存到 img_cache/ 返回本地路径；拿不到返回 None。
-    网关负责解密；thumb=True 取缩略图（看懂内容足够、省 token），要高清传 False。
+    wxtest负责解密；thumb=True 取缩略图（看懂内容足够、省 token），要高清传 False。
     图没下载到本地（404）、首次派生密钥中（503）、网络断都当拿不到，不影响文字回复。
     返回文件路径而不是 base64：任务 JSON 保持小，Muse 用自己的看图能力打开文件。"""
     import base64, hashlib
@@ -379,14 +379,15 @@ def attach_files(msgs, chat, limit=2):
     return list(reversed(out))
 
 def attach_images(msgs, chat, limit=3):
-    """新消息里的图片：[{id, path}]，最新的优先，最多 limit 张（防刷屏/省 token）。"""
+    """新消息里的图片和表情：[{id, path}]（表情加 emoji: true），最新的优先，最多 limit 张（防刷屏/省 token）。
+    表情由 wxtest 转成 jpg：动图是按顺序抽几帧拼成的一张宫格。"""
     out = []
     for m in reversed(msgs):
-        if m.get("type") != 3:
+        if m.get("type") not in (3, 47):
             continue
         p = image(chat, m["id"])
         if p:
-            out.append({"id": m["id"], "path": p})
+            out.append({"id": m["id"], "path": p, **({"emoji": True} if m.get("type") == 47 else {})})
         if len(out) >= limit:
             break
     return list(reversed(out))
@@ -399,7 +400,8 @@ def transcript(msgs, me_id, me, each=500, total=3000):
     for m in msgs:
         who = (f"{me}的助理" if m.get("ai") else me) if m.get("sender_id") == me_id else (m.get("sender") or "对方")
         t = m.get("type")
-        body = m.get("content", "") if t == 1 else f"[图片#{m.get('id')}]" if t == 3 else tag.get(t, "[其他]")
+        body = (m.get("content", "") if t == 1 else f"[图片#{m.get('id')}]" if t == 3
+                else f"[表情#{m.get('id')}" + (f"：{m['content']}" if m.get("content") else "") + "]" if t == 47 else tag.get(t, "[其他]"))
         if t == 10000:
             body = f"[系统：{m.get('content') or ''}]"
         elif t == 50:                                   # 通话：「[通话] 通话时长 00:15」「[通话] 已取消」

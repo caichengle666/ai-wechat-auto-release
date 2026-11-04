@@ -1,13 +1,31 @@
-# 网关接口与掉线自修（要直接调接口或微信掉线时才读）
+# wxtest 接口与掉线自修（要直接调接口或微信掉线时才读）
 
 ## 接口说明去哪查
-全部接口、参数、返回值以 wxtest 自带的说明为准（最新、最全，这里不抄一份）：
+全部接口、参数、返回值以 wxtest 自带的说明为准（最新、最全；下面只列常用的，细节和其余接口都去那里查）：
 `curl -s -H "X-Token: $AWX_TOKEN" "$AWX_BASE/api"`
 
+常用接口（都要带 `X-Token`）：
+| 用途 | 接口 |
+|---|---|
+| 状态、登录、在线 agent | `GET /status` |
+| 会话列表、未读 | `GET /sessions?unread=1` |
+| 某个聊天的消息 | `GET /messages?chat=<微信号或群号>&limit=30` |
+| 搜聊天记录 | `GET /search?q=关键词[&chat=]` |
+| 群成员 | `GET /members?chat=<群>` |
+| 发文字/文件/图片 | `POST /send`（`{"to","text"}` 或带 `file_b64`+`filename`，跨机器带 `job`） |
+| 发语音条 | `POST /speak`（`{"to","text","voice"?}`），声音列表 `GET /voices` |
+| 看图片/表情 | `GET /image?chat=&id=&b64=1`（表情给 jpg，动图拼成几帧宫格） |
+| 收到的文件 | `GET /file?chat=&id=&b64=1` |
+| 看视频 | `GET /video/frames?chat=&id=`、`GET /video/ask?chat=&id=&q=` |
+| 语音转文字 | `POST /voice2text` |
+| 撤回（2 分钟内） | `POST /revoke` |
+| 领任务、交结论、心跳 | `GET /next_task`、`POST /task/<id>`、`POST /heartbeat` |
+| 慢操作结果 | `GET /job?id=<job>&wait=15` |
+
 能用现成脚本就别直接调接口（`tick.py` 领任务、`act.py` 交结论、`hb.py` 心跳、`say.py` 代发、`sns.py` 朋友圈、`radar.py` 群商机，`awx.py` 已封装好下面这些坑）。自己调时记住：
-- 慢操作（`/send`、`/voice2text`、`/moments*` 的 POST）跨机器一律在 body 带 `job`，再 `GET /job?id=&wait=15` 轮询；同一个 `job` 重复提交不会重做；查到 `unknown`（网关重载过）或 `UNCONFIRMED` 就先查消息/动态确认发没发出，别直接重发。
+- 慢操作（`/send`、`/voice2text`、`/moments*` 的 POST）跨机器一律在 body 带 `job`，再 `GET /job?id=&wait=15` 轮询；同一个 `job` 重复提交不会重做；查到 `unknown`（wxtest 重载过）或 `UNCONFIRMED` 就先查消息/动态确认发没发出，别直接重发。
 - 发文件：文件在 agent 机器上，用 `file_b64` + `filename` 传；`file` 只认微信机器上 `WX_FILE_DIR` 里的文件。
-- 不要自己给回复加备注，网关强制加。
+- 不要自己给回复加备注，wxtest 强制加。
 
 ## 微信掉线了怎么自己修
 本人只需要在手机上点一下确认或扫码，其余都由你做。按顺序：
