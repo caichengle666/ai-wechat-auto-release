@@ -45,14 +45,22 @@ docker run -d --name ai-wechat-auto --restart unless-stopped \
 - 令牌：`docker exec ai-wechat-auto cat /data/wxauto/api_token`
 - 首次：让用户用手机微信扫码。二维码三选一：`docker logs` 字符画、`<地址>/qr?token=令牌`、远程桌面 `<地址>/desktop?token=令牌`。扫码页要在**别的屏幕**打开，手机才扫得到。
 - 以前登过：会自动点「登录」，只需用户在手机上点确认。
-- 等 `/status` 出现 `logged_in:true`、`keys_ready:true`、`ctrl_enter:true` 才算就绪；`ctrl_enter` 不是 true 时 `/send` 会拒绝。
+- 等 `/status` 出现 `logged_in:true`、`keys_ready:true`、`ctrl_enter:true` 才算就绪；`ctrl_enter` 不是 true 时 `/send` 会拒绝。用户看不懂 JSON 的话，让 TA 打开体检页 `<地址>/check?token=令牌`，哪项不对一眼看出、截图就能排查。
 
 ### 给 AI 装 skill（第一次）
-skill 跟镜像走，从用户自己的 wxtest 拉（最省事）；也可从公开仓库 https://github.com/caichengle666/ai-wechat-auto-release 的 `skill/` 目录下载，再自己写 `awx.env`（`AWX_BASE=…`、`AWX_TOKEN=…` 两行，600 权限）。微信登录好以后，wxtest 会把填好地址和令牌的这句命令发到用户的**文件传输助手**一次（`docker logs` 里 `[skill]` 那行也有，令牌要自己填）；用户转给 AI，AI 在自己那台机器上跑（要有 curl 和 python3）：
+skill 跟镜像走，从用户自己的 wxtest 拉（最省事）；也可从公开仓库 https://github.com/caichengle666/ai-wechat-auto-release 的 `skill/` 目录下载，再自己写 `awx.env`。微信登录好以后，wxtest 会把一段填好地址和令牌的话发到用户的**文件传输助手**一次，用户整段转给 AI。AI 按这个顺序做，每步把输出原样给用户看，出错就停下说原因，不要自己改代码：
+0. **先自报**：你是哪个 AI 平台；能不能跑 shell 命令（要有 curl 和 python3）；能不能建每 10 秒跑一次的定时任务（hook，值班要用）。有一项不能就停下告诉用户，别硬装。
+1. 建目录并写配置（只有自己能读）：
 ```bash
-mkdir -p muse-wechat && cd muse-wechat && curl -fsSL -A awx -H "Authorization: Bearer <令牌>" <地址>/skill?install=1 | AWX_BASE=<地址> AWX_TOKEN=<令牌> python3 -
+mkdir -p muse-wechat && cd muse-wechat
+(umask 077; printf 'AWX_BASE=%s\nAWX_TOKEN=%s\n' '<地址>' '<令牌>' > awx.env)
 ```
-它把 skill 写到当前目录，地址和令牌存进 `awx.env`（600），并打印远程桌面地址（`<地址>/desktop?token=令牌`，wxtest 关了远程桌面就没有）。**装完第一件事：把这个地址发给用户本人**（只发本人），告诉 TA 浏览器打开就能看到微信界面、掉线扫码也用它，建议收藏；然后接着做「第二步」。已经装过的目录不会重装；以后的升级由 wxtest 自动派，不用再跑。临时隧道重启后地址会变，wxtest 会再往文件传输助手发一条新地址，让 AI 改 `awx.env` 的 `AWX_BASE`。
+2. 下载安装脚本，先读一遍再跑（不要用 `curl | python3` 管道）：
+```bash
+curl -fsSL -A awx -o install.py <地址>/skill?install=1
+python3 install.py
+```
+脚本先自检：Python 版本、连不连得上 wxtest、令牌对不对（这三项不过就停下，按它说的原因告诉用户）；微信没登录、发送键没确认只提示，可以先装。然后把 skill 写到当前目录，打印**体检页**（`<地址>/check?token=令牌`）和**远程桌面**（`<地址>/desktop?token=令牌`，wxtest 关了远程桌面就没有）。**装完第一件事：把这两个地址发给用户本人**（只发本人）：远程桌面能看到微信界面、掉线扫码也用它；体检页用大白话列出哪里不对，出问题让用户截图（地址栏裁掉）就能排查，不用跑命令。然后接着做「第二步」。已经装过的目录不会重装；以后的升级由 wxtest 自动派，不用再跑。临时隧道重启后地址会变，wxtest 会再往文件传输助手发一条新地址，让 AI 改 `awx.env` 的 `AWX_BASE`。
 
 ### 常见问题
 - 一直停在「登录」按钮、手机收不到确认：`docker restart ai-wechat-auto`。

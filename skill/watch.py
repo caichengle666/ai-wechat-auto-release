@@ -248,7 +248,8 @@ def main_next(hook=False):
         print(json.dumps({"id": tid, "must": MUST.format(id=tid), **json.load(open(p[0], encoding="utf-8"))}, ensure_ascii=False))
 
 MUST = ("必须以执行 tasks 里的 act 命令收尾（不回也交 {{}}），不要只给主会话或本人写汇报；"
-        "读不到内容或被平台拦下就马上执行 python3 watch.py release {id} 原因，交给别台")
+        "读不到内容或被平台拦下就马上执行 python3 watch.py release {id} 原因，交给别台；"
+        "不要自己发通知给本人（看不到原文只能报编号），wxtest 会带原文告诉本人")
 
 def main():
     a = sys.argv[1:]
