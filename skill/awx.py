@@ -186,6 +186,14 @@ def task_done(tid, body):
     except Exception as e:
         print(f"[task] {tid} {e}", file=sys.stderr, flush=True)
 
+def task_release(tid, why, retry=False):
+    """处理不了就交还给 wxtest，别台马上接（retry：值班发现没人动它，自动交还，只按次数算放弃）。
+    交上回 {"ok": true, "status": "RELEASED"}；409 回现状；网络错误回 None（wxtest 5 分钟后自己收回）。"""
+    try:
+        return _post(f"/task/{tid}", {"release": why, **({"retry": True} if retry else {})}, 20)
+    except Exception as e:
+        print(f"[task] 交还 {tid} 失败：{e}", file=sys.stderr, flush=True)
+
 def messages(chat, limit=30, before=0):
     """最近 limit 条；before 给消息 id 就取它之前的（往前翻；迁移来的老记录 id 是负数）。"""
     return api(f"/messages?chat={urllib.parse.quote(chat)}&limit={limit}&before={before}").get("messages", [])

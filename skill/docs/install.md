@@ -52,7 +52,7 @@ skill 跟镜像走，从用户自己的 wxtest 拉（最省事）；也可从公
 ```bash
 mkdir -p muse-wechat && cd muse-wechat && curl -fsSL -A awx -H "Authorization: Bearer <令牌>" <地址>/skill?install=1 | AWX_BASE=<地址> AWX_TOKEN=<令牌> python3 -
 ```
-它把 skill 写到当前目录，地址和令牌存进 `awx.env`（600），然后接着做「第二步」。已经装过的目录不会重装；以后的升级由 wxtest 自动派，不用再跑。临时隧道重启后地址会变，wxtest 会再往文件传输助手发一条新地址，让 AI 改 `awx.env` 的 `AWX_BASE`。
+它把 skill 写到当前目录，地址和令牌存进 `awx.env`（600），并打印远程桌面地址（`<地址>/desktop?token=令牌`，wxtest 关了远程桌面就没有）。**装完第一件事：把这个地址发给用户本人**（只发本人），告诉 TA 浏览器打开就能看到微信界面、掉线扫码也用它，建议收藏；然后接着做「第二步」。已经装过的目录不会重装；以后的升级由 wxtest 自动派，不用再跑。临时隧道重启后地址会变，wxtest 会再往文件传输助手发一条新地址，让 AI 改 `awx.env` 的 `AWX_BASE`。
 
 ### 常见问题
 - 一直停在「登录」按钮、手机收不到确认：`docker restart ai-wechat-auto`。

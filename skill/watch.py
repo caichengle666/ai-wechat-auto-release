@@ -3,13 +3,14 @@
 """值班循环：一直挂在 wxtest 上领任务，手里永远只拿一条。
   python3 watch.py          常驻（已有一份在跑就直接退出，可反复调用来「保活」）
   python3 watch.py setup    一键上岗：停旧值班（run_loop.sh/watch_loop.sh、crontab 里的开班）→ 装 systemd（装不上就算了）→ 拉起 → 自检，最后打印平台 hook 要填的那一行
-  python3 watch.py hook     平台 hook 每 10 秒跑这一句：保活（up）+ 新任务打印一次（REMIND 秒后还在再打印一次），其余时候什么都不输出；在哪个目录调用都行
+  python3 watch.py hook     平台 hook 每 10 秒跑这一句：保活（up）+ 新任务只打印一次，其余时候什么都不输出；在哪个目录调用都行
   python3 watch.py install  装成 systemd 用户服务（挂了 5 秒自动拉起、开机自启），装不上会说明改用 hook
   python3 watch.py up       保活：没在跑就脱离当前会话在后台拉起一份（setsid），在跑就什么都不做
   python3 watch.py next     打印最早一条待处理任务（没有就什么都不输出）
   python3 watch.py status   看本机名字、代码指纹和 wxtest 上在线的 agent
   python3 watch.py update   马上从 wxtest 拉它自带的那版 skill 覆盖本地代码（平时落后了 wxtest 会自己派，不用手动）
   python3 watch.py done ID  处理完删掉（带 --task 的任务 act.py 交回后会自动删，alert/摘要等没有 --task 的要手动 done）
+  python3 watch.py release ID 原因   处理不了（读不到内容、被平台拦下）：交还给 wxtest，别台马上接；都处理不了 wxtest 告诉本人
 领到任务写进 inbox/<ID>.json，设置了 wake 就马上跑它叫醒 Muse，然后不再领下一条，直到 inbox 空了；等待期间续着 tick_at，后台心跳不会退出。
 wxtest 规定单条领走 5 分钟没交就收回，所以处理要快；处理不了也别拖，交 {} 或 done 掉，好让别的 agent 接。"""
 import fcntl, glob, json, os, re, subprocess, sys, time, types
@@ -17,8 +18,9 @@ import db, psync
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 INBOX = os.path.join(HERE, "inbox")
-REMIND = 240        # hook 同一条只叫醒一次，这么久还没处理再提醒一次（每 10 秒都打印会把平台唤醒放大 33 倍，处理员排队几小时）
-STALE = 330          # 超过 wxtest 的单条上限（300 秒）还没处理完：wxtest 已收回改派别人，本地这份作废，丢掉接着领
+GIVEBACK = 180      # 叫醒后这么久处理员还没跑 act（没起来、被平台拦下、只汇报没交）：交还给 wxtest 让别台马上接，不干等 5 分钟收回
+                    # （hook 同一条只叫醒一次：重复叫醒会把平台唤醒放大、处理员排队几小时；第二次叫醒实测也没用）
+STALE = 330          # 交还没交上（连不上 wxtest）且超过 wxtest 的单条上限（300 秒）：已被收回改派，本地这份作废，丢掉接着领
 
 def log(m):
     print(time.strftime("%H:%M:%S"), m, file=sys.stderr, flush=True)
@@ -58,9 +60,25 @@ def mark(tid):
     except (OSError, ValueError): n = 0
     open(p, "w").write(str(n + 1))
 
+def started(tid):  # inbox/.<ID>.act：act.py 已经开始处理这条（发过稍等、在查资料），值班不交还
+    return os.path.join(INBOX, f".{tid}.act")
+
+def begin(tid):
+    try: open(started(tid), "w").close()
+    except OSError as e: log(f"[watch] 记不下 {tid} 已开始：{e}")
+
+def release(tid, why, retry=False):
+    """交还 wxtest 并从收件箱删掉。返回 wxtest 的回复（None = 没交上）。"""
+    tid = os.path.basename(tid).removesuffix(".json")
+    try: import awx
+    except SystemExit: return None
+    r = awx.task_release(tid, why, retry)
+    if r is not None: done(tid)                # 交上了或已不是本机的（409）都删；连不上留着，STALE 兜底
+    return r
+
 def done(tid):
     tid = os.path.basename(tid).removesuffix(".json")
-    for p in (os.path.join(INBOX, f"{tid}.json"), shown(tid)):
+    for p in (os.path.join(INBOX, f"{tid}.json"), shown(tid), started(tid)):
         try: os.remove(p)
         except OSError: pass
 
@@ -198,7 +216,13 @@ def step(c):
         time.sleep(30); return
     p = pending()
     if p:
-        if time.time() - os.path.getmtime(p[0]) > STALE:
+        tid, ago = os.path.basename(p[0])[:-5], time.time() - os.path.getmtime(p[0])
+        if ago > GIVEBACK and not os.path.exists(started(tid)) and "--task" in open(p[0], encoding="utf-8").read():
+            r = release(tid, f"处理员 {GIVEBACK} 秒没动它", retry=True)
+            if r is not None:
+                log(f"[watch] {tid} 叫醒 {GIVEBACK} 秒处理员还没跑 act，已交还 wxtest 让别台接（{r.get('status') or r.get('error')}）；请查处理员为什么没处理")
+                return
+        if ago > STALE:
             log(f"[watch] {os.path.basename(p[0])} 超过 {STALE} 秒没处理完（wxtest 已收回改派），丢弃；请查处理员为什么没处理")
             done(p[0]); return
         db.meta_set(c, "tick_at", str(int(time.time())))   # 手里有活，心跳别退
@@ -215,14 +239,16 @@ def step(c):
 
 def main_next(hook=False):
     p = pending()
-    if p and hook:                             # hook：同一条只给一次，REMIND 秒后还在再给一次，之后不再给（330 秒丢弃）
+    if p and hook:                             # hook：同一条只给一次（GIVEBACK 秒没人动值班自己交还）
         tid = os.path.basename(p[0])[:-5]
-        try: n, ago = int(open(shown(tid)).read() or 0), time.time() - os.path.getmtime(shown(tid))
-        except (OSError, ValueError): n, ago = 0, 0
-        if n >= 2 or (n == 1 and ago < REMIND): return
+        if os.path.exists(shown(tid)): return
         mark(tid)
     if p:
-        print(json.dumps({"id": os.path.basename(p[0])[:-5], **json.load(open(p[0], encoding="utf-8"))}, ensure_ascii=False))
+        tid = os.path.basename(p[0])[:-5]
+        print(json.dumps({"id": tid, "must": MUST.format(id=tid), **json.load(open(p[0], encoding="utf-8"))}, ensure_ascii=False))
+
+MUST = ("必须以执行 tasks 里的 act 命令收尾（不回也交 {{}}），不要只给主会话或本人写汇报；"
+        "读不到内容或被平台拦下就马上执行 python3 watch.py release {id} 原因，交给别台")
 
 def main():
     a = sys.argv[1:]
@@ -232,6 +258,9 @@ def main():
         main_next()
     elif a[0] == "done" and len(a) > 1:
         done(a[1])
+    elif a[0] == "release" and len(a) > 1:
+        r = release(a[1], " ".join(a[2:]) or "处理不了")
+        print(json.dumps(r, ensure_ascii=False) if r is not None else "没交上（连不上 wxtest），5 分钟后 wxtest 自己收回改派")
     elif a[0] == "up":
         up()
     elif a[0] == "hook":

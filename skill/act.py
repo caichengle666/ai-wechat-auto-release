@@ -40,6 +40,7 @@ def main():
     if chk and not chk["mine"]:        # 早被收回、别台处理过或已作废（处理员晚了几小时才跑）：什么都不动，画像、标签、草稿、稍等都不写不发
         print(f"[task] {tid} 已不是本机的（{chk['status']}，{chk['agent']}），不处理", flush=True)
         watch.done(tid); return
+    if tid: watch.begin(tid)           # 告诉值班：已在处理，别自动交还
     out = run(chat, "--media" in args, args[args.index("--sns") + 1] if "--sns" in args else None)
     if out is None:                    # 只发了「稍等」，任务留在手里，查完再跑一次
         return
