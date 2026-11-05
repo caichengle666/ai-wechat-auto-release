@@ -103,6 +103,24 @@ def done(tid):
 
 LOCK = os.path.join(HERE, "watch.lock")
 UNIT = "awx-watch.service"
+LOGF, LOG_MAX = os.path.join(HERE, "watch.log"), 1 << 20   # 满 1MB 轮转，留一份 watch.log.1
+
+def trim_log(path=None, limit=LOG_MAX):
+    """watch.log 超过上限：整份挪成 .1（旧的 .1 覆盖），原文件清零。写的人（systemd append、up 的 "a"）都是追加模式，
+    清零后接着从头写，不用重开文件。返回是否轮转了。"""
+    path = path or LOGF
+    try:
+        if os.path.getsize(path) <= limit: return False
+        with open(path, "rb") as src, open(path + ".1", "wb") as dst:
+            while True:
+                b = src.read(1 << 16)
+                if not b: break
+                dst.write(b)
+        os.truncate(path, 0)
+        log(f"[watch] watch.log 超过 {limit >> 20}MB，旧内容挪到 watch.log.1")
+        return True
+    except FileNotFoundError: return False
+    except OSError as e: log(f"[watch] watch.log 轮转没成：{e}"); return False
 
 def running():
     """已有一份值班在跑（它拿着 watch.lock）。"""
@@ -114,7 +132,7 @@ def running():
 def up():
     """hook 保活：不挂在调用它的会话上（会话结束、超时被平台清进程树时值班不跟着死）。"""
     if running(): return
-    log_f = open(os.path.join(HERE, "watch.log"), "a")
+    log_f = open(LOGF, "a")
     subprocess.Popen([sys.executable, os.path.abspath(__file__)], cwd=HERE, stdin=subprocess.DEVNULL,
                      stdout=log_f, stderr=log_f, start_new_session=True)
     log("[watch] up：没在跑，已在后台拉起")
@@ -195,8 +213,9 @@ def loop():
     log("[watch] 开始值班")
     try: import awx                             # 没令牌时 awx import 就退出：那就不查升级，值班照跑
     except SystemExit: awx = None; log("[watch] awx 起不来（没令牌？），不查代码升级")
-    build, checked = awx and awx.BUILD, time.time()
+    build, checked, trimmed = awx and awx.BUILD, time.time(), 0
     while True:
+        if time.time() - trimmed > 60: trimmed = time.time(); trim_log()
         if awx and time.time() - checked > 60 and not pending():   # skill 升级了（拉了新代码）：手里没活时退出，hook 10 秒内用新代码拉起
             checked = time.time()
             if awx._build() != build:

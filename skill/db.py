@@ -94,12 +94,13 @@ def config(c):
     title = g("title") or g("me")
     num = lambda k, dft: int(g(k)) if g(k).isdigit() else dft
     names = [n.strip() for n in g("names").replace("，", ",").split(",") if n.strip()]
+    tt = lambda v: v.replace("<称呼>", title)        # 控制面板里写的「<称呼>」换成本人称呼
     return {
         "me": g("me"), "me_id": g("me_id"), "title": title,
         "names": sorted(set(names + [g("me"), title]) - {""}),     # 群里算“叫到我”的名字
-        "sign": off(g("sign", f"【{title}的私人助理·自动回复】")),
-        "voice_sign": off(g("voice_sign")),   # 没填 = 不念
-        "hold": g("hold", f"这事我做不了主，等{title}本人回你。"),
+        "sign": off(tt(g("sign", f"【{title}的私人助理·自动回复】"))),
+        "voice_sign": off(tt(g("voice_sign"))),   # 没填 = 不念
+        "hold": tt(g("hold", f"这事我做不了主，等{title}本人回你。")),
         "redlines": g("redlines"),                       # 用户自己填，空 = 不加这一行
         "notify_to": meta(c, "notify_to", "filehelper"),   # 只有它允许设成空串（=只打日志）
         "rollout": g("rollout", "auto"),

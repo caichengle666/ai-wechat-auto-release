@@ -6,7 +6,7 @@ import awx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 KEEP = 3        # 备份留几份（.bak/<时间>-<旧指纹>/）
-DATA = ("settings.json", "awx.env", "store.db", "hb.pid", "watch.lock", "watch.log")
+DATA = ("settings.json", "awx.env", "store.db", "hb.pid", "watch.lock", "watch.log", "watch.log.1")
 
 def _ok(rel):
     """只认仓库跟踪的那几类：顶层 .py/SKILL.md/schema.sql/settings.example.json、docs/ styles/ 下的 .md、rules/_example.md。"""
