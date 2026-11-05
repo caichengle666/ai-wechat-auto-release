@@ -139,8 +139,8 @@ python3 alert.py test  # 填了 alert 才跑：发一条测试提醒，问用户
 
 ## 第四步：一次性：批量画像
 反复做，直到输出 `{"tasks": []}`：
-1. `python3 persona.py next 5` → 得到最多 5 个任务，每个有 `instruction`、`history`。
-2. 对每个任务按 `instruction` 读 `history`，写出 `{"profile": {...}}`。
+1. `python3 persona.py next 5` → 得到最多 5 个任务，每个有 `history`（可能带 `ask_label`）。
+2. 对每个任务按 SKILL.md「写回复的规矩」里的「画像」读 `history`，写出 `{"profile": {...}}`（有 `ask_label` 一并打标签）。
 3. 写库：`python3 act.py <chat> <<'EOF'` 换行贴 JSON 再换行 `EOF`（用 heredoc，免得回复里的引号把命令弄坏）。
 
 

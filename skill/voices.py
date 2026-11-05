@@ -31,13 +31,11 @@ def _card(v):
     try: return open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "styles", os.path.basename(v) + ".md"), encoding="utf-8").read().strip()
     except OSError: return ""
 
-def style(cfg, v):
-    """给 Muse 的写法说明：回复会念出来，按这个声音的风格卡写。"""
-    r = roles(cfg).get(v)
-    s = ("\n对方发的是语音，这次回复会转成语音条发出去：写成说话的口气，短句、口语，不用表情符号、链接、列表和括号，"
-         "数字照常写（会自动读成中文）。结尾的自我介绍由系统加，你别写。")
+def brief(cfg, v):
+    """回复要念成语音时给 Muse 的资料：用谁的声音、以什么身份、风格卡（写法见 SKILL.md「写回复的规矩」）。"""
+    r, out = roles(cfg).get(v), {}
     if r:
-        s += (f"这条语音用{r[0].strip()}的声音念，你以{cfg['title']}的私人助手「{r[1].strip()}」的身份说话，"
-              f"模仿{r[0].strip()}的说话风格（口头禅、节奏、语气），但别自称{r[0].strip()}本人，事实和红线照常守。")
-    if c := _card(v): s += "\n说话风格照这张卡（口头禅别句句都用，自然点）：\n" + c.replace("<称呼>", cfg["title"])
-    return s
+        out.update(speaker=r[0].strip(), as_name=r[1].strip())
+    if c := _card(v):
+        out["card"] = c.replace("<称呼>", cfg["title"])
+    return out

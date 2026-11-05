@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Muse 循环跑：挂在 wxtest 上领任务，没活时什么都不输出（Muse 直接下一轮，不用动脑）。
 wxtest 已把微信里的事实整理好做成任务：合并连发、群里有没有叫到本人、本人在不在聊、语音转好文字、刷屏不叫。
-这里只做千人千面的那部分：按画像和规则决定回不回、拼说明；要回就输出 {"tasks": [...]}（instruction + context），
+这里只做千人千面的那部分：按画像和规则决定回不回、整理资料；要回就输出 {"tasks": [...]}（只有事实字段，写法在 SKILL.md），
 Muse 写出 JSON 后执行任务里的 act 命令；不回就当场交回。设置一变就把只读过滤名单推给 wxtest。
 平时由 watch.py 循环调用。后台心跳 hb.py 自动拉起，只防掉线：单条领走 5 分钟没交 wxtest 照样收回；多个 agent 同时跑时 wxtest 按租约一条只派给一个。
 文件传输助手里本人发的管理命令、别人撤回消息、朋友圈评论、微信掉线/恢复、每晚日报也都是 wxtest 派的任务（掉线卡住它自己重启微信）；
@@ -25,9 +25,8 @@ def notes():
     return {"notify": "\n".join(NOTES)} if NOTES else {}
 
 def _muse_alert(text, qr=""):
-    return {"alert": text, **({"qr": qr} if qr else {}),
-            "instruction": text + "微信里发不出通知：请你立刻用你自己和本人的聊天渠道（不是微信）告诉本人"
-                           + ("，附上 qr 扫码页地址" if qr else "") + "。这个任务没有 act，不用执行命令。恢复后脚本会自己接着干。"}
+    """微信里发不出的掉线通知：Muse 用自己和本人的聊天渠道转告（怎么做见 SKILL.md 常驻第 6 条）。"""
+    return {"kind": "alert", "alert": text, **({"qr": qr} if qr else {})}
 
 def reach(c, err=None):
     """wxtest 本身连不上（机器停了、外网地址断了）：它报不了，只能这边按 alert 设置报。返回要 Muse 转告的任务或 None。"""
@@ -347,12 +346,7 @@ def digest_task(c, cfg):
                              + awx.transcript(msgs, cfg["me_id"], cfg["me"] or cfg["title"], each=300, total=6000))
     if not parts:
         return None
-    title = cfg["title"]
-    return {"chat": cfg["notify_to"], "alias": "群摘要", "context": "\n\n".join(parts),
-            "instruction": f"你是{title}的私人助理。context 是{title}关注的几个群过去 24 小时的聊天，给{title}写每日群摘要："
-                           "每个群一段，3~6 句，按重要程度写：群里的要事和通知（有买卖、报价的写清原话）、"
-                           f"有人 @ 或提到{title}的事、值得{title}跟进的人；闲聊、表情、广告略过，没正事的群一句「无要事」。"
-                           "开头写「【群摘要】」，只总结，不替本人回复或报价。这次不是 JSON：直接把摘要正文用 heredoc 喂给 act 命令。",
+    return {"kind": "群摘要", "chat": cfg["notify_to"], "alias": "群摘要", "title": cfg["title"], "context": "\n\n".join(parts),
             "act": f"python3 say.py {cfg['notify_to']}"}
 
 def _remember(c, chat, recent, cfg, voice=None, ask=()):
@@ -375,62 +369,46 @@ def _build(c, chat, name, cfg, recent, new, tags=(), remark=None, called=False):
         prof = dict(prof, rules=db.rules(chat, prof.get("alias"), tags))
         if "VIP" in tags:                                    # VIP：正事一律只存草稿/转告本人
             prof["risk"] = "high"
-    instruction, context = rr.build_prompt(prof, recent, cfg)
-    t = {"chat": chat, "alias": name, "instruction": instruction, "context": context,
-         "act": f"python3 act.py {chat}" + ("" if ok else " --media")}
+    who, context = rr.person(prof, recent, cfg)
+    # 任务包只放事实，怎么用这些字段写在 SKILL.md「写回复的规矩」（命令口吻的说明放进包里会被平台安全检查拦）
+    t = {"kind": "群聊" if prof["is_group"] else "私聊", "chat": chat, "alias": name, "title": cfg["title"],
+         "person": who, "context": context, "act": f"python3 act.py {chat}" + ("" if ok else " --media")}
+    if prof["is_group"]:
+        t["my_names"] = cfg["names"]
+    if cfg["redlines"]:
+        t["redlines"] = cfg["redlines"]
     if ok:                                  # 更早的聊天：照本人以前怎么跟 TA 聊来回，知道前因后果
         e = awx.earlier(chat, recent, cfg["me_id"], cfg["me"] or cfg["title"], n=60 if prof["is_group"] else 150)
         if e:
             t["earlier"] = e
-            t["instruction"] += ("\nearlier 是 context 之前更早的聊天：看本人以前怎么跟 TA 说话、之前聊到哪，接得上再回，别重复问已经说过的。"
-                                 f"还要找更早的具体内容（某个型号、某次报价、某件事）就运行 python3 awx.py search 关键词 {chat}，"
-                                 "查到的旧报价只能当背景，不能当现价报给对方。")
     money = [] if prof["is_group"] else rr.paid(new, cfg)
     if money:                               # 本人定：别人转钱一定要回，道谢再接个话题
-        t["instruction"] += (f"\n对方刚给{cfg['title']}转了钱（{'；'.join(money)}）。这次一定要回（intent 不能是 none）："
-                             f"先替{cfg['title']}道谢，再顺着对方最近聊的、画像或朋友圈自然接一个轻松话题，一两句就好。"
-                             "不问也不确认这笔钱是什么用途、对不对账，不承诺任何事；对方转账时附了话就一并回应。")
-    if tags:
-        t["instruction"] += (f"\n{cfg['title']}在微信里给 TA 打的标签：{'、'.join(tags)}。这是{cfg['title']}亲手标的 TA 跟{cfg['title']}的关系/身份"
-                             + (f"，分三层：大类（{'、'.join(cfg['label_top'])}）" if cfg["label_top"] else "")
-                             + (f"{'，' if not cfg['label_top'] else ''}关系（{'、'.join(cfg['label_rel'])}，每人一个）定你认人、用什么语气、站什么身份；其余是补充" if cfg["label_rel"] else "")
-                             + "。按标签意思拿捏：工作关系（客户、供应商、同事、同行等）专业客气、守住红线，家人朋友同学随和亲近，推销类礼貌简短；"
-                             "补充标签（行业、公司、阶段、VIP 等）帮你知道 TA 做什么、聊什么。比你从聊天里猜的准，画像也以它为准。"
-                             "工作关系又带「朋友」的：语气熟络，正事照样按规矩。")
-    who = {m.get("sender") or m["sender_id"]: m["sender_labels"] for m in recent if m.get("sender_labels") and m.get("sender_id") != cfg["me_id"]}
-    if prof["is_group"] and who:            # 群里各人的标签：回谁就按谁的身份拿捏语气（仍守公共场合规则）
-        t["instruction"] += (f"\n群里这些人{cfg['title']}打过标签：" + "；".join(f"{k}={'、'.join(v)}" for k, v in who.items())
-                             + "。回谁就按谁的标签认人、定语气（仍守公共场合规则）。")
+        t["money"] = money
+    if tags:                                # 本人亲手打的微信标签
+        t["tags"] = list(tags)
+        if cfg["label_top"]: t["label_top"] = list(cfg["label_top"])
+        if cfg["label_rel"]: t["label_rel"] = cfg["label_rel"]
+    gt = {m.get("sender") or m["sender_id"]: m["sender_labels"] for m in recent if m.get("sender_labels") and m.get("sender_id") != cfg["me_id"]}
+    if prof["is_group"] and gt:             # 群里各人的标签：回谁就按谁的身份拿捏语气
+        t["group_tags"] = gt
     feeds = "" if prof["is_group"] or not (ok or need) else awx.moments(chat)
     if ok and feeds:                        # 对方最近的朋友圈：知道 TA 在忙什么
         t["moments"] = feeds
-        t["instruction"] += ("\nmoments 是 TA 最近的朋友圈（新的在前）：用来了解 TA 最近在忙什么、关心什么，回复时自然地参考"
-                             "（比如顺口关心一句），别生硬复述，也别说「我看了你朋友圈」；正事照常按规则。")
     if ok and cfg.get("vision"):            # 只有确定要回的才取图，不为每张图唤醒/花 token
         imgs = awx.attach_images(new, chat)
         if imgs:
             t["images"] = imgs
-            t["instruction"] += ("\n对方发了图片或表情，context 里的 [图片#id]、[表情#id] 对应 images 里同 id 的本地文件，先打开看懂再回；"
-                                 "带 emoji 的是表情，动图已按顺序抽几帧拼成一张宫格（从左到右、从上到下），按动作和情绪理解；"
-                                 "图里的价格、合同、账号等照样守红线，看不清就别猜。")
     last = next((m for m in reversed(new) if m.get("sender_id") != cfg["me_id"]), {})
     if ok and cfg["voice_reply"] and not prof["is_group"] and (last.get("content") or "").startswith("[语音]"):
         t["voice"] = voices.pick(cfg, chat, prof.get("alias"), tags)   # 对方发语音就回语音：用谁的声音、按谁的风格写
-        if t["voice"]: t["instruction"] += voices.style(cfg, t["voice"])
+        if t["voice"]: t["spoken"] = voices.brief(cfg, t["voice"])   # 有这个字段（哪怕是空的）= 回复会念成语音
     vids = [] if prof["is_group"] or not ok else rr.videos(new, cfg)
     if vids:                                # 单聊发视频（含视频号）：先听完再聊内容（本人 11-03 定，群里不做）
-        t["instruction"] += (f"\n对方发了视频（context 里的 {'、'.join(f'#{i}' for i in vids[-2:])}）：回之前先逐个运行 "
-                             + "；".join(f"python3 awx.py video {chat} {i}" for i in vids[-2:])
-                             + " 看懂讲了什么（要几十秒到几分钟，耐心等）。再像朋友一样就内容简短聊一两句：说出一个具体的点或看法，"
-                             "不复述全文、不写摘要、不评价发视频的人；内容涉及报价、合同、政治敏感、负面社会新闻照样守红线。"
-                             "看不成就照实说只看到标题，随口接一句，别编内容。")
+        t["videos"] = [{"id": i, "cmd": f"python3 awx.py video {chat} {i}"} for i in vids[-2:]]
     if ok:                                  # 对方发了文件：取原文件给 Muse 自己打开读
         files = awx.attach_files(new, chat)
         if files:
             t["files"] = files
-            t["instruction"] += ("\n对方发了文件，context 里的 [文件#id] 对应 files 里同 id 的本地文件（path），先打开读懂内容再回"
-                                 "（PDF/Word/Excel/图片等用你自己的能力读，表格里的数字照原样）；带 error 的是没拿到，就说收到了、稍后看。"
-                                 "文件里的报价、合同、对账、账号等照样守红线，只转告本人，不替本人确认。")
     lab = (db.labels_on(cfg) and not tags and not prof["is_group"] and (ok or need)
            and time.time() - float(db.meta(c, "labelask:" + chat) or 0) > persona.LABEL_EVERY)
     if lab:                                 # 本人清掉过 AI 打的标签：这个人 AI 不再打
@@ -442,18 +420,13 @@ def _build(c, chat, name, cfg, recent, new, tags=(), remark=None, called=False):
         done = awx.ai_done("remark")
         rmk = done is not None and chat not in done
     p = persona.task(c, chat, name) if need else None
-    if (lab or rmk) and not p and ok:       # 不用画像时也顺带问一句：看得出就打，不强制
-        t["instruction"] += ("\n另外这个人还没有" + "和".join(x for x, y in (("微信标签", lab), ("备注", rmk)) if y)
-                             + "，你自己判断要不要补：要补就在回复的 JSON 顶层加对应字段，不补就不加。"
-                             + (persona.label_help(cfg, awx.all_labels()) if lab else "") + (persona.REMARK_HELP if rmk else ""))
+    if (lab or rmk) and (p or ok):          # 顺带问一句：看得出就补，不强制
+        if lab: t["ask_label"] = persona.label_opts(cfg, awx.all_labels())
+        if rmk: t["ask_remark"] = True
         t["_ask"] = [k for k, y in (("labelask", lab), ("remarkask", rmk)) if y]   # 结论交上了 act 才记「问过」，任务过期下次照问
-    if p:
-        t["instruction"] += ("\n另外这个人还没画像（或画像过期）：先读 history 给 TA 画像，结果放进同一个 JSON 的 \"profile\" 字段，"
-                             "回复按新画像来。\n" + persona.FIELDS_HELP.format(title=cfg["title"])
-                             + (persona.label_help(cfg, awx.all_labels()) if lab else "") + (persona.REMARK_HELP if rmk else ""))
-        t["_ask"] = [k for k, y in (("labelask", lab), ("remarkask", rmk)) if y]   # 结论交上了 act 才记「问过」，任务过期下次照问
-        t["history"] = (p["history"] + (f"\n\n{cfg['title']}给 TA 打的微信标签（身份/行业，画像以它为准）：{'、'.join(tags)}" if tags else "")
-                        + (f"\n\nTA 最近的朋友圈（画像时参考 TA 在忙什么、关心什么）：\n{feeds}" if feeds else ""))
+    if p:                                   # 还没画像（或过期）：先读 history 画像
+        t["history"] = p["history"]
+        if feeds and not ok: t["moments"] = feeds
     return t
 
 FILTER_EVERY = 600       # 过滤名单没变也每 10 分钟重推一次（wxtest 重装过也能补上）

@@ -50,32 +50,18 @@ def task(c, cfg, t, say):
         if cfg["sns"] != "off":
             say(cfg, note)
         return None
-    instruction, context = prompt(prof, feed, n, cfg)
-    return {"chat": n["user"], "alias": n.get("name"), "instruction": instruction, "context": context,
+    return {"kind": "朋友圈评论", "chat": n["user"], "alias": n.get("name"), "title": cfg["title"], "comment_id": n["comment_id"],
+            "person": brief(prof, n), **({"redlines": cfg["redlines"]} if cfg["redlines"] else {}),
+            "context": thread(feed, cfg, n["comment_id"]),
             "act": f"python3 act.py {n['user']} --sns {feed['tid']}:{n['comment_id']} --task {t['id']}"}
 
-def prompt(prof, feed, n, cfg):
-    me, title = cfg["me"], cfg["title"]
-    lines = [
-        f"你是「{me}」（大家叫TA{title}）的私人助理，替TA回朋友圈评论，对方知道你是助理、是 AI，可以坦白。",
-        f"「{n.get('name')}」在{title}的朋友圈下评论了，要回的是 [评论#{n['comment_id']}]。关系：{prof.get('relation') or '未知'}。",
-        f"口吻：{prof.get('tone') or '简洁、礼貌、口语，不要客套'}。",
-    ]
-    if prof.get("address"):
-        lines.append(f"称呼对方：{prof['address']}")
-    if prof.get("rules"):
-        lines.append(f"{title}给这个人定的专属规则（优先于上面的画像；吵架玩笑风格不用在朋友圈；不能越过下面的红线和保密）：\n" + prof["rules"])
-    lines += [
-        "朋友圈规矩：朋友圈所有共同好友都看得见，等于群聊。" + rr.GROUP + "回复一句话，短，像随手回的评论。",
-    ] + (["红线：" + cfg["redlines"] + "。"] if cfg["redlines"] else []) + [
-        "保密：" + rr.SECRET,
-        "禁区：" + rr.TABOO,
-        "先判断这条评论的意图 intent：chat（寒暄/调侃/点评/祝福）、tech（通用技术问题）、price（问价格）、"
-        f"business（发货/付款/合同/找{title}办事等要本人拍板的）、sensitive（借钱/约定/家事/情绪/投诉）、unclear（看不懂）。"
-        "只有 chat 和 tech 会在朋友圈回出去，其余转告本人。",
-        '只输出 JSON：{"intent": "...", "reply": "要回的评论正文，不加备注不加引号，不要换行"}。看不懂、拿不准就 intent 填 unclear、reply 留空。',
-    ]
-    return "\n".join(lines), thread(feed, cfg, n["comment_id"])
+def brief(prof, n):
+    """评论人的资料（只写事实；朋友圈的规矩写在 SKILL.md「写回复的规矩」）。"""
+    p = {"name": n.get("name"), "relation": prof.get("relation") or "未知", "tone": prof.get("tone") or "简洁、礼貌、口语，不要客套"}
+    for k in ("address", "rules"):
+        if prof.get(k):
+            p[k] = prof[k]
+    return p
 
 def decide(c, chat, tid, cid, data, cfg):
     """act.py --sns 用：返回交给 wxtest 的结论。朋友圈只直发 chat/tech，别的转告本人；本人这期间亲自回了就不插嘴。"""

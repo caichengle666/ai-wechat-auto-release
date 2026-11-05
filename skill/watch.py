@@ -259,12 +259,7 @@ def main_next(hook=False):
         mark(tid)
     if p:
         tid = os.path.basename(p[0])[:-5]
-        print(json.dumps({"id": tid, "must": MUST.format(id=tid), **json.load(open(p[0], encoding="utf-8"))}, ensure_ascii=False))
-
-MUST = ("必须以执行 tasks 里的 act 命令收尾（不回也交 {{}}），不要只给主会话或本人写汇报；"
-        "读不到内容或被平台拦下就马上执行 python3 watch.py release {id} 原因，交给别台；"
-        "不要自己发通知给本人（看不到原文只能报编号），wxtest 会带原文告诉本人；"
-        "act 打印「已不是本机的」（本人已接管、别台接手、已作废）就直接结束，不要汇报「没回成」")
+        print(json.dumps({"id": tid, **json.load(open(p[0], encoding="utf-8"))}, ensure_ascii=False))   # 只放事实：必须以 act 收尾等规矩在 SKILL.md（命令口吻进输出会被平台安全检查拦）
 
 def main():
     a = sys.argv[1:]
