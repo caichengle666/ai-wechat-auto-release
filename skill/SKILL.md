@@ -147,5 +147,6 @@ Muse 每次先判断对方意图：chat 闲聊 / tech 专业或常识问题（�
 - 没装过、要部署：`docs/install.md`
 - **第一次安装，或用户要改设置/参数**（称呼、备注、接管时间、日报时间、上限等）：`docs/settings.md`，只在这两种时候读
 - 用 SQL 调画像、文件说明：`docs/manage.md`
+- **本人要把手机里的老聊天记录导进来**（「迁移聊天记录」「导入聊天记录」）：`docs/migration.md`，照着一步步带本人做（要家里一台常开的 Linux 设备 + Tailscale，容器要 `--cap-add NET_ADMIN`）；导进来的记录 `/messages`、`/search` 自动能读
 - **忘了接口、不会用、脚本不够用**：`curl -s -H "X-Token: $AWX_TOKEN" "$AWX_BASE/api"` 查全部接口说明（以它为准）；直接调接口要注意的坑和微信掉线自修：`docs/api.md`
 - 整个 muse-skill 文件夹打包就能移植（代码、`rules/`、`settings.json`、`store.db` 一起带走）；`rules/`、`settings.json`、`store.db` 是隐私，不提交、不外发。
