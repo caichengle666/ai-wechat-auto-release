@@ -33,6 +33,14 @@ docker logs -f ai-wechat-auto
 - 没用固定域名时，重启后地址会变，文件传输助手会再收到一条新地址，转给 AI 即可。
 - 以后的升级由容器自动推给 AI，不用再操作。
 
+## 升级
+镜像有新版时，在装微信的机器上换新容器（登录数据在 wxdata 里不会丢，手机上点一下确认即可）：
+```bash
+docker pull ghcr.io/caichengle666/ai-wechat-auto-bin:latest
+docker rm -f ai-wechat-auto
+```
+然后用第 1 步同一条 `docker run` 命令再启动（加过的 `-e` 参数照样带上）。新容器起来后，几分钟内会自动把新 skill 推给 AI，不用动 AI 那边。
+
 ## 另一种装 skill 的方式：从这个仓库下载
 文件传输助手那段话最省事（地址和令牌已填好）。也可以让 AI 直接从这里下载 `skill/` 目录：
 ```bash
