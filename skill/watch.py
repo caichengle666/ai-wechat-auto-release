@@ -21,6 +21,7 @@ INBOX = os.path.join(HERE, "inbox")
 GIVEBACK = 180      # 叫醒后这么久处理员还没跑 act（没起来、被平台拦下、只汇报没交）：交还给 wxtest 让别台马上接，不干等 5 分钟收回
                     # （hook 同一条只叫醒一次：重复叫醒会把平台唤醒放大、处理员排队几小时；第二次叫醒实测也没用）
 STALE = 330          # 交还没交上（连不上 wxtest）且超过 wxtest 的单条上限（300 秒）：已被收回改派，本地这份作废，丢掉接着领
+VIDEO_MAX, VIDEO_GRACE = 930, 180   # 处理员在等看懂视频（awx.py video 每轮刷新 .act，wxtest 那边同样放宽到 900 秒）：过期时限放宽
 
 def log(m):
     print(time.strftime("%H:%M:%S"), m, file=sys.stderr, flush=True)
@@ -66,6 +67,10 @@ def started(tid):  # inbox/.<ID>.act：act.py 已经开始处理这条（发过�
 def begin(tid):
     try: open(started(tid), "w").close()
     except OSError as e: log(f"[watch] 记不下 {tid} 已开始：{e}")
+
+def busy(tid):   # .act 最近刷新过（awx.py video 还在等视频，或刚等完）
+    try: return time.time() - os.path.getmtime(started(tid)) < VIDEO_GRACE
+    except OSError: return False
 
 def release(tid, why, retry=False):
     """交还 wxtest 并从收件箱删掉。返回 wxtest 的回复（None = 没交上）。"""
@@ -236,7 +241,7 @@ def step(c):
             if r is not None:
                 log(f"[watch] {tid} 叫醒 {GIVEBACK} 秒处理员还没跑 act，已交还 wxtest 让别台接（{r.get('status') or r.get('error')}）；请查处理员为什么没处理")
                 return
-        if ago > STALE:
+        if ago > STALE and not (busy(tid) and ago < VIDEO_MAX):
             log(f"[watch] {os.path.basename(p[0])} 超过 {STALE} 秒没处理完（wxtest 已收回改派），丢弃；请查处理员为什么没处理")
             done(p[0]); return
         db.meta_set(c, "tick_at", str(int(time.time())))   # 手里有活，心跳别退

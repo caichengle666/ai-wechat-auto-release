@@ -470,6 +470,14 @@ USAGE = ("用法：python3 awx.py search <关键词，空格分开=都要有> [�
          "      python3 awx.py video <微信号> <消息id> [问题]  看懂视频（含视频号分享），几十秒到几分钟\n"
          "      python3 awx.py voices  已有哪些声音（克隆：文件传输助手发录音+「克隆声音 本人/新名字」，wxtest 自己做）")
 
+def _video_busy(chat):
+    """看视频要几十秒到几分钟：告诉值班手里这条在处理（刷新 inbox/.<ID>.act），别 180 秒交还、别当过期丢掉。"""
+    try:
+        import watch
+        for f in watch.pending():
+            if chat in open(f, encoding="utf-8").read(): watch.begin(os.path.basename(f)[:-5])
+    except Exception as e: print(f"[video] 标记处理中没成：{type(e).__name__}: {e}", file=sys.stderr)
+
 if __name__ == "__main__":     # 给 Muse 用的命令行：查更早的聊天、看公众号文章
     cmd = sys.argv[1:2]
     if cmd == ["articles"]:
@@ -480,7 +488,10 @@ if __name__ == "__main__":     # 给 Muse 用的命令行：查更早的聊天�
         p = f"/video/ask?chat={quote(sys.argv[2])}&id={sys.argv[3]}&q={quote(' '.join(sys.argv[4:]))}&wait=55"
         end = time.time() + 900
         try:
-            while "state" in (r := api(p, timeout=70)) and time.time() < end: pass
+            while True:
+                _video_busy(sys.argv[2])
+                if "state" not in (r := api(p, timeout=70)) or time.time() >= end: break
+            _video_busy(sys.argv[2])   # 等完再刷一次：看图、写回复还要一会
         except urllib.error.HTTPError as e:
             sys.exit(f"没看成：{e.read().decode(errors='replace') if e.fp else e.msg}")
         if "state" in r: sys.exit("还没处理完，过几分钟再跑一次")

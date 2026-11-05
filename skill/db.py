@@ -47,11 +47,13 @@ def _read(name):
         return f.read().strip()
 
 def rules(chat, alias=None, labels=()):
-    """这个人的专属规则文件 rules/<微信号>.md，没有就找 rules/<备注名>.md，都没有用 rules/_default.md；
+    """这个人的专属规则文件 rules/<微信号>.md，没有就找 rules/<备注名>.md，都没有用 rules/_default.md；再接上对所有人都适用的 rules/_all.md；
     本人在微信里给 TA 打了标签的，再接上 rules/标签-<标签名>.md（同一类客户共用，专属规则优先）。
     回谁只读谁的那一份；用户自己写，自动画像不碰。"""
     own = next((_read(n) for n in (chat, alias, "_default") if n and os.path.isfile(rule_path(n))), "")
     parts = [own] if own else []
+    if os.path.isfile(rule_path("_all")) and (common := _read("_all")):   # 本人的自定义规则：对所有人都适用，排在专属规则后面（冲突以专属为准）
+        parts.append("（本人对所有人的通用规则，和上面冲突时以上面为准）\n" + common)
     for lb in labels:
         if os.path.isfile(rule_path("标签-" + lb)):
             parts.append(f"（微信标签「{lb}」这类客户的共用规则，和上面冲突时以上面为准）\n" + _read("标签-" + lb))

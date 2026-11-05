@@ -34,7 +34,7 @@
    - `scan`：要扫码 → 把扫码页 `<AWX_BASE>/qr?token=<AWX_TOKEN>` 发给本人（页面每 5 秒刷新，二维码过期自动换新）。
    - `starting`：微信刚重启，等 30 秒再看。
    - `stuck`：卡住了（没二维码也没在等确认）→ wxtest 会自己重启微信进程（最多 10 分钟一次）；急的话可以 `POST /relogin`，30 秒后再看 `/status`。
-2. 拿不准屏幕上是什么：`GET /screen` 取截图看一眼；本人想自己看可以开 `/desktop?token=` 远程桌面（只看不点）。
+2. 拿不准屏幕上是什么：`GET /screen` 取截图看一眼；本人想自己看，让本人去控制面板（`<地址>/panel`）打开远程桌面（要验证码，令牌进不去）。
 3. 登录后 `/status` 变回 `logged_in: true`，tick.py 自动接着干。
 
 铁律：
