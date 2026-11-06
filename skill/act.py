@@ -131,6 +131,14 @@ def run(chat, media, sns_ref=None):
                              f"{name} 问技术：「{said}」，已回稍等但没查到靠谱资料，等你亲自回。")
     else:
         print(f"[skip] {name}: 不回", flush=True)
+    return with_ref(out, data)
+
+def with_ref(out, data):
+    """Muse 用业务工具查到的参考（建议价、客户上次价、账款等）只给本人看：接在通知后面，绝不进发给对方的正文。"""
+    ref = " ".join(str(data.get("ref") or "").split())[:300]
+    if not ref: return out
+    for k in ("notify", "notify_if_sent"):
+        if out.get(k): out[k] += f"\n参考：{ref}"
     return out
 
 def wait(c, chat, name, prof, cfg, tk, text):

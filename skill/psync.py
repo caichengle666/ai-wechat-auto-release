@@ -6,10 +6,11 @@
 - 共用设置：meta 里 settings.json 的项，除 agent/wake/vision（各机自留）；别台改的写进本机 meta 和 settings.json。
 - 本地删了规则文件 / 画像行 → 推删除；别台删的跟着删。
 - 即时同步：本机有任何改动（AI 学到的、本人改的、rules/ 文件、删除）watch.py 发现后请 wxtest 马上轮一次，wxtest 收下后别台全部马上对齐；掉线回来的先对齐再干活。
-- wxtest 的库丢了（epoch 变了）或本地库丢了（psync 表空）：本地全量回传，不删本地；新 agent 第一次就是全量。
+- wxtest 的库丢了（epoch 变了）：本地全量回传，不删本地。新 agent 第一次（或本地库丢了）：先拉 wxtest 已有的、以那边为准，再推那边没有的。
 命令：python3 psync.py              请 wxtest 马上安排一次同步（本人刚让你改了谁的规则时用）
       python3 psync.py history 名字   看这人画像最近几版（谁改的）；history r:文件名.md 看规则文件
-      python3 psync.py rollback 名字 [版本]   退回上一版（或指定版），所有 agent 马上跟着改"""
+      python3 psync.py rollback 名字 [版本]   退回上一版（或指定版），所有 agent 马上跟着改
+      python3 psync.py join 这台的名字   已有别的 agent 在用同一个微信时，新装这台用它：从 wxtest 拿共用设置写 settings.json，只用起名字，不用再问一遍"""
 import hashlib, json, os, sys, time
 import db
 
@@ -77,6 +78,12 @@ def set_mine(c, key, val, log):
     _apply_settings(c, {key: val}, log, who="本人")
     db.meta_set(c, "psync_urgent", "1")
 
+def _extra(c, it):
+    """拉下来写进本机后，本机还有没有那边空着的值。"""
+    if it.get("deleted"): return False
+    mine, theirs = local(c).get(it["key"]) or {}, it.get("data") or {}
+    return any(v not in (None, "") and theirs.get(k) in (None, "") for k, v in mine.items() if k not in HASH_SKIP and k != "locked")
+
 def dirty(c):
     """本机改过、还没推的：[{key, base, data} 或 {key, base, deleted}]。"""
     _init(c)
@@ -132,6 +139,8 @@ def run(c, task, log=lambda m: print(m, file=sys.stderr, flush=True)):
     t0, pushed, got, conflicts, resets = time.time(), 0, 0, 0, 0
     epoch, cursor = db.meta(c, "psync_epoch"), int(db.meta(c, "psync_cursor") or 0)
     todo, urg = dirty(c), urgent(c)
+    first = not epoch and not c.execute("SELECT 1 FROM psync LIMIT 1").fetchone()
+    if first: todo = []   # 新 agent 第一次：先把 wxtest 上已有的拉下来（本机装好时生成的初始画像以那边为准），再推那边没有的，免得几十条「冲突」
     start = {k: _h(k, d) for k, d in local(c).items()}     # 开始时本地每条的指纹：途中本机又改了的不拿别台的覆盖
     low, raced = None, 0                                    # low：写失败的最小版本，游标不越过它（下次重拉）
     try:
@@ -153,6 +162,7 @@ def run(c, task, log=lambda m: print(m, file=sys.stderr, flush=True)):
                     if _now_hash(c, k) != start.get(k, "DEL"):   # 同步途中本机又改了这条：不覆盖，下一轮带旧 base 推上去由 wxtest 合并
                         raced += 1; log(f"[psync] {str(k)[:40]} 同步途中本机又改了，先不覆盖，马上再同步一次"); continue
                     h = _apply(c, it, log); got += 1
+                    if first and _extra(c, it): h = ""            # 第一次对齐：本机有、那边空着的字段还要推上去（标成改过）
                     c.execute("INSERT OR REPLACE INTO psync VALUES(?,?,?)", (k, int(it["ver"]), h))
                     start[k] = h
                 except Exception as e:
@@ -162,7 +172,11 @@ def run(c, task, log=lambda m: print(m, file=sys.stderr, flush=True)):
             epoch, cursor = r.get("epoch") or epoch, int(r.get("cursor") or cursor)
             db.meta_set(c, "psync_epoch", epoch); db.meta_set(c, "psync_cursor", str(cursor))
             if int(r.get("schema") or 0) > SCHEMA: log(f"[psync] 别的 agent 的画像格式更新（{r.get('schema')} > {SCHEMA}），本机 skill 该升级了；不认识的字段 wxtest 原样留着")
-            if not r.get("more") and not todo: break
+            if not r.get("more") and not todo:
+                if not first: break
+                first, todo = False, dirty(c)
+                if got: log(f"[psync] 第一次对齐：已有的 {got} 条以 wxtest 为准写进本机，再推本机独有的 {len(todo)} 条")
+                if not todo: break
     except BaseException as e:            # 连不上 / 没令牌（SystemExit）/ 任务被收回（409）都只记
         log(f"[psync] 同步失败（{time.time() - t0:.1f}s）：{e}"); return None
     if low is not None and low - 1 < cursor:
@@ -180,12 +194,41 @@ def request(c=None, log=lambda m: print(m, file=sys.stderr, flush=True)):
     except BaseException as e:
         log(f"[psync] 请求马上同步没成功（下次再试）：{e}"); return False
 
+def join(name, path=None):
+    """新加一台：共用设置抄 wxtest 上最新一版（别台填过的），agent 写这台的名字，wake/vision 用示例默认。返回写了几项；wxtest 上没有就 0（第一台，照常问用户）。"""
+    import awx
+    path = path or _settings_file()
+    here = os.path.dirname(os.path.abspath(__file__))
+    raw = json.load(open(os.path.join(here, "settings.example.json"), encoding="utf-8"))
+    if os.path.exists(path):      # 只是 cp 了示例、名字和称呼还没填的可以盖；填过的不动
+        try: old = json.load(open(path, encoding="utf-8"))
+        except ValueError: old = {}
+        if any(old.get(k) not in (None, "", raw.get(k)) for k in ("me", "title")): raise SystemExit(f"{path} 已经填过本人名字/称呼，不覆盖；要重来先删掉它")
+    vs = awx.api("/profiles/history?key=" + awx.quote(SETTINGS)).get("versions", [])
+    cur = next((v["data"] for v in vs if not v["deleted"]), None)
+    if not cur: return 0
+    for k, v in cur.items():
+        if k in db.SETTING_KEYS and k not in db.LOCAL_KEYS: raw[k] = str(v)
+    raw["agent"] = name
+    if os.path.exists(path): os.remove(path)
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w", encoding="utf-8") as fh: json.dump(raw, fh, ensure_ascii=False, indent=2)
+    return len(cur)
+
 def _key(c, name):
     if name.startswith(("p:", "r:", "s:")): return name
     r = c.execute("SELECT chat FROM profile WHERE chat=? OR alias=?", (name, name)).fetchone()
     return "p:" + (r["chat"] if r else name)
 
 def main(a):
+    if a[:1] == ["join"]:
+        if len(a) < 2 or not a[1].strip(): sys.exit("要给这台起名字：python3 psync.py join 名字（问用户，别和已有的重名）")
+        import awx
+        names = [x.get("agent") for x in awx.api("/status").get("agents", [])]
+        if a[1] in names and a[1] != awx.AGENT: sys.exit(f"「{a[1]}」已经有一台在用了（在线：{'、'.join(names)}），换一个名字")
+        n = join(a[1].strip())
+        print(f"已从 wxtest 拿到别台的 {n} 项共用设置写进 settings.json，名字 {a[1]}。不用再问用户设置，直接做 docs/install.md 第三步（seed.py）" if n
+              else "wxtest 上还没有共用设置（这是第一台），回到第二步照常问用户")
+        return
     c = db.conn(); db.init(c)
     if not a:
         print("已请 wxtest 马上安排同步" if request(c) else "没请成，看上面的原因")
