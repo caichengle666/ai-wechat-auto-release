@@ -2,10 +2,11 @@
 # -*- coding: utf-8 -*-
 """值班循环：一直挂在 wxtest 上领任务，手里永远只拿一条。
   python3 watch.py          常驻（已有一份在跑就直接退出，可反复调用来「保活」）
-  python3 watch.py setup    一键上岗：停旧值班（run_loop.sh/watch_loop.sh、crontab 里的开班）→ 装 systemd（装不上就算了）→ 拉起 → 自检，最后打印平台 hook 要填的那一行
-  python3 watch.py hook     平台 hook 每 10 秒跑这一句：保活（up）+ 新任务只打印一次，其余时候什么都不输出；在哪个目录调用都行
-  python3 watch.py install  装成 systemd 用户服务（挂了 5 秒自动拉起、开机自启），装不上会说明改用 hook
-  python3 watch.py up       保活：没在跑就脱离当前会话在后台拉起一份（setsid），在跑就什么都不做
+  python3 watch.py setup    一键上岗：停旧值班（run_loop.sh/watch_loop.sh、crontab 里的开班）→ 装 systemd 服务（系统级优先，再试用户级）→ 装不上才装 crontab 保活 → 拉起 → 自检，最后打印平台 hook 要填的那一行
+  python3 watch.py cron     只装 crontab 保活（每分钟 + 开机各跑一次 keepalive.py），不靠平台 hook；重复跑只留一份，值班在跑时丢了会自己补回
+  python3 watch.py hook     平台 hook 每 10 秒跑这一句：systemd 服务重建丢了就重装 + 保活（up）+ 新任务只打印一次，其余时候什么都不输出；在哪个目录调用都行
+  python3 watch.py install  只装 systemd 服务（系统级优先，再试用户级；挂了 5 秒自动拉起、开机自启），装不上会说明
+  python3 watch.py up       保活：没在跑就让 systemd 拉，没装服务就脱离当前会话在后台拉起一份（setsid），在跑就什么都不做
   python3 watch.py next     打印最早一条待处理任务（没有就什么都不输出）
   python3 watch.py status   看本机名字、代码指纹和 wxtest 上在线的 agent
   python3 watch.py update   马上从 wxtest 拉它自带的那版 skill 覆盖本地代码（平时落后了 wxtest 会自己派，不用手动）
@@ -13,8 +14,8 @@
   python3 watch.py release ID 原因   处理不了（读不到内容、被平台拦下）：交还给 wxtest，别台马上接；都处理不了 wxtest 告诉本人
 领到任务写进 inbox/<ID>.json，设置了 wake 就马上跑它叫醒 Muse，然后不再领下一条，直到 inbox 空了；等待期间续着 tick_at，后台心跳不会退出。
 wxtest 规定单条领走 5 分钟没交就收回，所以处理要快；处理不了也别拖，交 {} 或 done 掉，好让别的 agent 接。"""
-import fcntl, glob, json, os, re, subprocess, sys, time, types
-import db, psync
+import fcntl, glob, json, os, re, subprocess, sys, time
+import db, keepalive, psync, sysd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 INBOX = os.path.join(HERE, "inbox")
@@ -102,7 +103,8 @@ def done(tid):
         except OSError: pass
 
 LOCK = os.path.join(HERE, "watch.lock")
-UNIT = "awx-watch.service"
+YIELD = os.path.join(HERE, "watch.yield")   # systemd 那份在等锁：里面是它的进程号，脱管那份做完这轮就让位
+SYSTEMD = bool(os.environ.get("AWX_SYSTEMD"))   # 本进程是 awx-watch 服务拉起的（unit 里设的，别用 INVOCATION_ID：平台 hook 引擎自己也在 systemd 下）
 LOGF, LOG_MAX = os.path.join(HERE, "watch.log"), 1 << 20   # 满 1MB 轮转，留一份 watch.log.1
 
 def trim_log(path=None, limit=LOG_MAX):
@@ -122,6 +124,12 @@ def trim_log(path=None, limit=LOG_MAX):
     except FileNotFoundError: return False
     except OSError as e: log(f"[watch] watch.log 轮转没成：{e}"); return False
 
+def yield_asked():
+    """systemd 那份在等锁（YIELD 里的进程号还活着）。留下的旧文件不算，免得脱管那份一起来就退。"""
+    try: pid = int(open(YIELD).read().strip() or 0)
+    except (OSError, ValueError): return False
+    return pid > 0 and os.path.exists(f"/proc/{pid}")
+
 def running():
     """已有一份值班在跑（它拿着 watch.lock）。"""
     with open(LOCK, "a") as f:
@@ -130,33 +138,12 @@ def running():
         fcntl.flock(f, fcntl.LOCK_UN); return False
 
 def up():
-    """hook 保活：不挂在调用它的会话上（会话结束、超时被平台清进程树时值班不跟着死）。"""
-    if running(): return
+    """hook 保活：装了 systemd 服务就让 systemd 拉；否则不挂在调用它的会话上拉起（会话结束、超时被平台清进程树时值班不跟着死）。"""
+    if running() or sysd.start(): return
     log_f = open(LOGF, "a")
     subprocess.Popen([sys.executable, os.path.abspath(__file__)], cwd=HERE, stdin=subprocess.DEVNULL,
                      stdout=log_f, stderr=log_f, start_new_session=True)
-    log("[watch] up：没在跑，已在后台拉起")
-
-def install():
-    """写 systemd 用户服务并启用。返回 0 成功；失败打印原因和 hook 兜底办法，返回 1。"""
-    d = os.path.expanduser("~/.config/systemd/user"); os.makedirs(d, exist_ok=True)
-    open(os.path.join(d, UNIT), "w").write(
-        "[Unit]\nDescription=ai-wechat-auto 值班循环（muse-skill/watch.py）\nStartLimitIntervalSec=0\n\n"
-        f"[Service]\nWorkingDirectory={HERE}\nExecStart={sys.executable} {os.path.abspath(__file__)}\n"
-        f"Restart=always\nRestartSec=5\nStandardOutput=append:{HERE}/watch.log\nStandardError=append:{HERE}/watch.log\n\n"
-        "[Install]\nWantedBy=default.target\n")
-    steps = [["systemctl", "--user", "daemon-reload"], ["systemctl", "--user", "enable", "--now", UNIT]]
-    for cmd in steps:
-        try: r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        except (OSError, subprocess.TimeoutExpired) as e: r = types.SimpleNamespace(returncode=1, stderr=str(e), stdout="")
-        if r.returncode:
-            print(f"systemd 用户服务没装上（{' '.join(cmd)}：{(r.stderr or r.stdout).strip()[:200]}）。"
-                  f"改用平台 hook 每 10 秒执行：cd {HERE} && python3 watch.py up")
-            return 1
-    try: subprocess.run(["loginctl", "enable-linger", os.environ.get("USER", "")], capture_output=True, timeout=10)
-    except (OSError, subprocess.TimeoutExpired) as e: log(f"[watch] enable-linger 没做成（不影响已在跑的服务）：{e}")
-    print(f"已装好并启动 {UNIT}（挂了 5 秒自动拉起、开机自启）。另建议 hook 每 10 秒执行 python3 watch.py up 兜底（在跑就什么都不做）。")
-    return 0
+    log_f.write(f"{time.strftime('%H:%M:%S')} [watch] up：没在跑，已在后台拉起\n"); log_f.close()   # 写进 watch.log：hook 里跑时 stderr 不在这
 
 OLD = ("run_loop.sh", "watch_loop.sh")   # 旧值班脚本（cron 开班 / 会话里循环），setup 时停掉
 
@@ -190,7 +177,8 @@ def status_line():
 
 def setup():
     for d in stop_old(): print(d)
-    systemd = install() == 0
+    systemd, msg = sysd.install(); print(msg)
+    crontab = "有 systemd 托管，不装 crontab。" if systemd else keepalive.install(); print(crontab)
     up()
     for _ in range(10):
         if running(): break
@@ -200,14 +188,23 @@ def setup():
     print("画像同步：" + ("已请 wxtest 马上安排一次（第一次是全量）" if psync.request(db.conn(), log) else "没请成，wxtest 按 sync_min 会自己安排"))
     print(f"还差平台上一步（代码做不了）：建一个每 10 秒的定时 hook，执行\n  {sys.executable} {os.path.abspath(__file__)} hook\n"
           "没有输出就什么都不做；有输出就是一条任务（JSON），叫醒处理员马上处理。"
-          + ("" if systemd else "（本机 systemd 用户服务装不上，保活全靠这个 hook。）")
-          + "\n平台自带的定时开班（例如 cron 每 N 分钟跑值班脚本）请删掉，不要再用。")
+          + ("" if systemd or crontab.startswith("crontab 保活已装") else "（本机 systemd 和 cron 都用不上，保活全靠这个 hook。）")
+          + ("\n平台上另建的值班保活（别的 hook、systemd 服务、watchdog 脚本）请删掉，hook 只留上面这一个。" if systemd else "")
+          + "\n平台自带的定时开班（例如每 N 分钟跑旧值班脚本）请删掉，不要再用"
+          + ("。" if systemd else "；上面那两行 crontab 保活是本程序装的，留着。"))
     return 0 if ok else 1
 
 def loop():
     lock = open(LOCK, "w")
     try: fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError: return                      # 已有一份在跑
+    except OSError:                             # 已有一份在跑
+        if not SYSTEMD: return
+        with open(YIELD, "w") as f: f.write(str(os.getpid()))
+        log("[watch] systemd 接管：等脱管那份做完手上这轮再让位")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+    if SYSTEMD:
+        try: os.remove(YIELD)
+        except FileNotFoundError: pass
     os.makedirs(INBOX, exist_ok=True)
     c = db.conn()
     log("[watch] 开始值班")
@@ -216,6 +213,9 @@ def loop():
     build, checked, trimmed = awx and awx.BUILD, time.time(), 0
     while True:
         if time.time() - trimmed > 60: trimmed = time.time(); trim_log()
+        if not SYSTEMD and yield_asked():
+            log("[watch] systemd 那份在等，让位退出"); return
+        keepalive.heal()                        # 装过 crontab 保活的：重建后守护没起、行丢了就补回
         if awx and time.time() - checked > 60 and not pending():   # skill 升级了（拉了新代码）：手里没活时退出，hook 10 秒内用新代码拉起
             checked = time.time()
             if awx._build() != build:
@@ -299,11 +299,13 @@ def main():
     elif a[0] == "up":
         up()
     elif a[0] == "hook":
-        up(); main_next(hook=True)
+        sysd.heal(); up(); main_next(hook=True)
     elif a[0] == "setup":
         sys.exit(setup())
+    elif a[0] == "cron":
+        print(keepalive.install())
     elif a[0] == "install":
-        sys.exit(install())
+        ok, msg = sysd.install(); print(msg); sys.exit(0 if ok else 1)
     elif a[0] == "status":
         print(status_line())
     elif a[0] == "update":

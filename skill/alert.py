@@ -2,13 +2,14 @@
 # -*- coding: utf-8 -*-
 """掉线告警：微信掉线时微信里发不出通知，改走用户自己选的渠道。
 渠道写在 settings.json 的 alert 里，可以填多个（逗号分隔或写成列表）：
+  serverchan:<Server酱 SendKey>  推到微信服务号（免费版每天 5 条）
   bark:<Bark 推送地址，如 https://api.day.app/你的key>
   mail:<收件邮箱>        发件 SMTP 用环境变量 SMTP_HOST、SMTP_PORT（默认 465）、SMTP_USER、SMTP_PASS
-  webhook:<网址>         POST JSON {"title","text","url"}，ntfy、Server酱、自建机器人中转等都能接
+  webhook:<网址>         POST JSON {"title","text","url"}，ntfy、自建机器人中转等都能接
   muse                   让 Muse 用它自己和本人的聊天渠道转告
 不填默认 muse。
 用法：python3 alert.py test   发一条测试，看各渠道通不通"""
-import json, os, smtplib, sys, urllib.request
+import json, os, re, smtplib, sys, urllib.parse, urllib.request
 from email.mime.text import MIMEText
 from email.header import Header
 
@@ -19,6 +20,16 @@ def _post(url, body):
     req = urllib.request.Request(url, json.dumps(body, ensure_ascii=False).encode(),
                                  {"Content-Type": "application/json; charset=utf-8"})
     urllib.request.urlopen(req, timeout=15).read()
+
+def _sc(key, title, text):
+    """Server酱：SCT 开头走 sctapi；Server酱³ 的 sctp<数字>t… 走自己的子域名。回的 code 不是 0 算失败。"""
+    key = key.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_\-]{8,80}", key): raise ValueError("SendKey 格式不对")
+    m = re.match(r"sctp(\d+)t", key)
+    url = f"https://{m.group(1)}.push.ft07.com/send/{key}.send" if m else f"https://sctapi.ftqq.com/{key}.send"
+    data = urllib.parse.urlencode({"title": title[:32], "desp": text}).encode()
+    r = json.loads(urllib.request.urlopen(urllib.request.Request(url, data), timeout=15).read(4096) or b"{}")
+    if r.get("code") not in (0, None): raise RuntimeError(f"Server酱回 {r.get('code')}：{str(r.get('message') or '')[:40]}")
 
 def _mail(to, title, text):
     miss = [k for k in ("SMTP_HOST", "SMTP_USER", "SMTP_PASS") if not os.environ.get(k)]
@@ -42,7 +53,9 @@ def send(spec, title, text, url=""):
     for ch in chs:
         kind, _, arg = ch.partition(":")
         try:
-            if kind == "bark":
+            if kind == "serverchan":
+                _sc(arg, title, text + (f"\n\n{url}" if url else ""))
+            elif kind == "bark":
                 _post(arg.rstrip("/"), {"title": title, "body": text, "url": url, "group": "微信助理"})
             elif kind == "mail":
                 _mail(arg, title, text + (f"\n\n{url}" if url else ""))

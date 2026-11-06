@@ -6,6 +6,9 @@
 
 本人让你操作朋友圈时只跑一条命令（内容从标准输入给，heredoc）：
   python3 sns.py list [条数]                 本人最近的朋友圈和评论、点赞（看 tid、评论 id）
+  python3 sns.py of <微信号> [条数]          某个好友最近的朋友圈（微信号是 wxid_… 那种 id）
+  python3 sns.py image <tid> [第几张]         把那条朋友圈的图存到本地并打印路径（从 1 数，不写=全部，最多 9 张；视频是封面），打开文件看
+  python3 sns.py video <tid> [问题]           看懂那条朋友圈里的视频（好友自己上传的；转发的视频号看不了，只有封面），打印答案或画面目录
   python3 sns.py post <<'EOF' … EOF          发朋友圈（只发本人明确指定的内容）
   python3 sns.py reply <tid> <评论id> <<'EOF' … EOF   回复本人朋友圈下的某条评论
   python3 sns.py comment <tid> <<'EOF' … EOF  在本人的朋友圈下评论
@@ -53,6 +56,7 @@ def task(c, cfg, t, say):
     return {"kind": "朋友圈评论", "chat": n["user"], "alias": n.get("name"), "title": cfg["title"], "comment_id": n["comment_id"],
             "person": brief(prof, n), **({"redlines": cfg["redlines"]} if cfg["redlines"] else {}),
             "context": thread(feed, cfg, n["comment_id"]),
+            **({"images": imgs} if (imgs := [{"id": i + 1, "path": p} for i, p in enumerate(awx.moment_images(feed))]) else {}),
             "act": f"python3 act.py {n['user']} --sns {feed['tid']}:{n['comment_id']} --task {t['id']}"}
 
 def brief(prof, n):
@@ -94,7 +98,9 @@ def decide(c, chat, tid, cid, data, cfg):
 
 def _show(feeds, cfg):
     for f in feeds:
-        print(f"tid={f['tid']}  {_ago(f.get('time'))}  {f.get('text') or '[无文字]'}")
+        print(f"tid={f['tid']}  {f.get('name', '')}  {_ago(f.get('time'))}  {f.get('text') or '[无文字]'}"
+              + (f"  [{'视频' if f.get('kind') == 'video' else '图'}×{f['media']}]" if f.get("media") else "")
+              + (f"  分享：{f['title']}" if f.get("title") else ""))
         if f.get("likes"):
             print("  赞：" + "、".join(x["name"] for x in f["likes"]))
         for x in f.get("comments", []):
@@ -111,12 +117,27 @@ def _run(path, body, wait=240):
 
 def main():
     a = sys.argv[1:]
-    if not a or a[0] not in ("list", "post", "reply", "comment", "delete"):
+    if not a or a[0] not in ("list", "of", "image", "video", "post", "reply", "comment", "delete"):
         raise SystemExit(__doc__)
     c = db.conn(); db.init(c); cfg = db.config(c)
     if a[0] == "list":
         n = int(a[1]) if len(a) > 1 and a[1].isdigit() else 5
         return _show(awx.api(f"/moments?user={cfg['me_id']}&limit={n}").get("feeds", []), cfg)
+    if a[0] == "of" and len(a) in (2, 3):
+        n = int(a[2]) if len(a) == 3 and a[2].isdigit() else 5
+        return _show(awx.api(f"/moments?user={awx.quote(a[1])}&limit={n}").get("feeds", []), cfg)
+    if a[0] == "image" and len(a) in (2, 3):
+        feed = (awx.api(f"/moments?tid={awx.quote(a[1])}").get("feeds") or [None])[0]
+        if not feed or not feed.get("media"): raise SystemExit("这条朋友圈没有图")
+        idx = [int(a[2]) - 1] if len(a) == 3 and a[2].isdigit() else range(min(int(feed["media"]), 9))
+        for i in idx:
+            print(f"第{i + 1}张：{awx.moment_image(feed['tid'], i) or '拿不到（图床链接可能过期了）'}")
+        return
+    if a[0] == "video" and len(a) >= 2:
+        feed = (awx.api(f"/moments?tid={awx.quote(a[1])}").get("feeds") or [None])[0]
+        if not feed or feed.get("kind") != "video":
+            raise SystemExit("这条是转发的视频号，看不了视频本身（sns.py image 看封面）" if feed and feed.get("kind") == "finder" else "这条朋友圈没有视频")
+        return awx.video_answer(f"/moments/video/ask?tid={awx.quote(feed['tid'])}&i=0&q={awx.quote(' '.join(a[2:]))}&wait=55", feed["tid"])
     if a[0] == "delete":
         if len(a) != 2: raise SystemExit(__doc__)
         return _run("/moments/delete", {"tid": a[1]})

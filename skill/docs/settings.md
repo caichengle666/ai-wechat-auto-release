@@ -58,7 +58,7 @@
 ## 三、通知和提醒
 | 字段 | 干什么用 / 什么场景改 | 默认 |
 |---|---|---|
-| `notify_to` | 通知、草稿提醒、日报发给谁（微信 username）；AI 助理全部断开时 wxtest 也发这里（单台断开、恢复只发文件传输助手）。想发给秘书或另一个号就改；填空串=只打日志 | filehelper（文件传输助手） |
+| `notify_to` | 通知、草稿提醒、日报发给谁（微信 username，控制面板里从联系人搜着选）；AI 助理全部断开时 wxtest 也发这里，并推到 `alert` 里的 Server酱/Bark/webhook（单台断开、恢复只发文件传输助手）。想发给秘书或另一个号就改；填空串=只打日志 | filehelper（文件传输助手） |
 | `report_hour` | 每天几点发日报（0~23）。习惯早上看就填 8 | 21 |
 | `recall` | 别人撤回消息时把原文告诉本人。`on`/`off` | on |
 | `sns` | 有人在本人朋友圈评论、或在别人朋友圈回复本人时怎么办：`notify` 告诉本人谁评论了什么；`reply` AI 以助理身份回复本人朋友圈下的评论（好友都看得见，按群聊规矩、带备注，只回闲聊和技术，问价/正事/敏感照样只转告本人，回了也告诉本人；只能回最近三天、带文字的朋友圈）；`off` 不管。点赞不提醒。想让客户的评论有人接话就开 `reply` | notify |
@@ -74,7 +74,7 @@
 | `catchup_min` | 消息晚到多少分钟算补收：微信掉线、重登后补同步下来的积压，不自动回（免得过半小时对着旧话题连回一串），wxtest 攒齐后往文件传输助手发一条汇总（谁几条、有没有叫到你）。用场：常掉线时调大，想更严调小 | 30 |
 | `wake` | `watch.py` 领到任务后立刻执行的一条 shell 命令，用来马上叫醒 Muse（填 Muse 平台自己的唤醒方式，比如调它的 webhook 或 CLI）；命令里可用环境变量 `AWX_TASK_ID`、`AWX_TASK_FILE`。10 秒没跑完就杀掉，失败写进 `watch.log`，hook 定时跑 `watch.py hook` 照样兜底。空 = 只靠 hook | 空 |
 | `sync_min` | 多台 agent 时画像和 rules/ 即时同步（哪台改了马上推，wxtest 马上给其余在线的下放，掉线回来先对齐）；这一项是兜底：每隔这么多分钟（且没有待回消息时）再对齐一次。一次只一台在做；干活只读本地。0 = 本机不参加同步 | 30 |
-| `alert` | 微信掉线时怎么提醒本人（这时微信发不出去），可多选逗号分隔：`bark:https://api.day.app/key`、`mail:邮箱`（另给 Muse 配 `SMTP_HOST` `SMTP_PORT` `SMTP_USER` `SMTP_PASS` 环境变量，密码不写文件）、`webhook:网址`、`muse`（Muse 用自己的渠道转告）。填好跑 `python3 alert.py test` 让用户确认收到 | muse |
+| `alert` | 微信掉线时怎么提醒本人（这时微信发不出去），可多选逗号分隔：`serverchan:SendKey`（Server酱，推到微信服务号，免费每天 5 条）、`bark:https://api.day.app/key`、`mail:邮箱`（另给 Muse 配 `SMTP_HOST` `SMTP_PORT` `SMTP_USER` `SMTP_PASS` 环境变量，密码不写文件）、`webhook:网址`、`muse`（Muse 用自己的渠道转告）。填好跑 `python3 alert.py test` 让用户确认收到。AI 助理全部断开、没人在线时微信掉线，wxtest 自己按这里的 serverchan/bark/webhook 推（muse、mail 它发不了）；控制面板「通知」里能分开填、点「发一条试试」 | muse |
 
 ## 四、AI 什么时候接手、等多久
 | 字段 | 干什么用 / 什么场景改 | 默认 |

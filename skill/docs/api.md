@@ -15,6 +15,7 @@
 | 发文字/文件/图片 | `POST /send`（`{"to","text"}` 或带 `file_b64`+`filename`，跨机器带 `job`） |
 | 发语音条 | `POST /speak`（`{"to","text","voice"?}`），声音列表 `GET /voices` |
 | 看图片/表情 | `GET /image?chat=&id=&b64=1`（表情给 jpg，动图拼成几帧宫格） |
+| 看懂朋友圈视频 | `GET /moments/video/ask?tid=&i=0&q=`（同 `/video/ask`；转发的视频号回 422） |
 | 收到的文件 | `GET /file?chat=&id=&b64=1` |
 | 看视频 | `GET /video/frames?chat=&id=`、`GET /video/ask?chat=&id=&q=` |
 | 语音转文字 | `POST /voice2text` |

@@ -26,7 +26,9 @@ SELECT * FROM draft WHERE sent=0;
 - `alert.py`   掉线告警：按 `alert` 发 Bark/邮件/webhook（`python3 alert.py test` 测试）
 - `persona.py` 批量画像任务
 - `reply_rules.py` 拼说明、风险表（本人在聊、群里叫没叫到本人由 wxtest 判）
-- `watch.py`   值班循环：一直领任务、手里只拿一条，写进 inbox/ 等 Muse 处理（next / done；install 装 systemd 用户服务，up 给 hook 保活）
+- `watch.py`   值班循环：一直领任务、手里只拿一条，写进 inbox/ 等 Muse 处理（next / done；install 装 systemd 服务，cron 装 crontab 保活，up 给 hook 保活）
+- `sysd.py`     systemd 保活：系统级优先、再试用户级；hook 每 10 秒查一次，重建丢了 unit 就重装；代理变量写进 .proxy.env 给服务读
+- `keepalive.py` crontab 每分钟/开机调的保活脚本：值班没在跑就拉起；值班里每 10 分钟自检，cron 守护没跑就起、两行丢了就补
 - `tick.py`    领一条（watch.py 循环调用）：挂在 wxtest 上领任务，要回就输出任务，没活什么都不输出；设置变了推过滤名单
 - `hb.py`      后台心跳，`tick.py` 自动拉起，只防掉线（单条 5 分钟没交照样收回），Muse 停了 2 分钟自己退出
 - `act.py`     执行 Muse 写的 JSON：存画像、按风险表定直发/草稿/通知，结论交回 wxtest 去发

@@ -334,16 +334,34 @@ def image(chat, mid, thumb=True):
     wxtest负责解密；thumb=True 取缩略图（看懂内容足够、省 token），要高清传 False。
     图没下载到本地（404）、首次派生密钥中（503）、网络断都当拿不到，不影响文字回复。
     返回文件路径而不是 base64：任务 JSON 保持小，Muse 用自己的看图能力打开文件。"""
-    import base64, hashlib
+    import hashlib
     os.makedirs(IMG_DIR, mode=0o700, exist_ok=True)
     _img_clean()
     name = hashlib.md5(f"{chat}:{mid}:{int(thumb)}".encode()).hexdigest()
+    return _img_get(name, f"/image?chat={chat}&id={mid}&thumb={1 if thumb else 0}&b64=1")
+
+def moment_image(tid, i=0, thumb=False):
+    """朋友圈 tid 的第 i 张图（从 0 数；视频是封面），wxtest 下载解密，存到 img_cache/ 返回本地路径；拿不到返回 None。"""
+    import hashlib
+    os.makedirs(IMG_DIR, mode=0o700, exist_ok=True)
+    _img_clean()
+    return _img_get(hashlib.md5(f"sns:{tid}:{i}:{int(thumb)}".encode()).hexdigest(),
+                    f"/moments/image?tid={tid}&i={int(i)}&thumb={1 if thumb else 0}&b64=1")
+
+def moment_images(feed, limit=3):
+    """一条朋友圈里的图（视频取封面），最多 limit 张：[路径]；拿不到的跳过。"""
+    if feed.get("kind") not in ("image", "video", "finder"): return []
+    return [p for p in (moment_image(feed["tid"], i) for i in range(min(int(feed.get("media") or 0), limit))) if p]
+
+def _img_get(name, path):
+    """按 name 查本地缓存，没有就调 wxtest 的 b64 接口取图存下来，返回路径；失败返回 None。"""
+    import base64
     for ext in ("jpg", "png", "gif", "webp", "bmp"):
         p = os.path.join(IMG_DIR, f"{name}.{ext}")
         if os.path.exists(p):
             return p
     try:
-        r = api(f"/image?chat={chat}&id={mid}&thumb={1 if thumb else 0}&b64=1", timeout=60)
+        r = api(path, timeout=60)
         data, mime = base64.b64decode(r["b64"]), r["mime"]
     except Exception:
         return None
@@ -478,6 +496,25 @@ def _video_busy(chat):
             if chat in open(f, encoding="utf-8").read(): watch.begin(os.path.basename(f)[:-5])
     except Exception as e: print(f"[video] 标记处理中没成：{type(e).__name__}: {e}", file=sys.stderr)
 
+def video_answer(p, tag, busy=lambda: None):
+    """/video/ask 或 /moments/video/ask：202 就接着等（最多 15 分钟），打印答案；没人声把画面存成图、打印目录。"""
+    end = time.time() + 900
+    try:
+        while True:
+            busy()
+            if "state" not in (r := api(p, timeout=70)) or time.time() >= end: break
+        busy()   # 等完再刷一次：看图、写回复还要一会
+    except urllib.error.HTTPError as e:
+        sys.exit(f"没看成：{e.read().decode(errors='replace') if e.fp else e.msg}")
+    if "state" in r: sys.exit("还没处理完，过几分钟再跑一次")
+    if r.get("speech") is False:   # 没人声：画面存成图，Muse 自己看图脑补
+        import base64, tempfile
+        d = tempfile.mkdtemp(prefix=f"awx-video-{tag}-")
+        for f in r.get("frames", []):
+            t = int(f["t"]); open(os.path.join(d, f"{t // 60:02d}m{t % 60:02d}s.jpg"), "wb").write(base64.b64decode(f["b64"]))
+        print(f"这条视频没人声，时长 {r.get('duration')} 秒，按时间截了 {len(r.get('frames', []))} 张画面（文件名=第几分几秒），自己看图判断讲了什么：{d}")
+    else: print(r.get("answer"))
+
 if __name__ == "__main__":     # 给 Muse 用的命令行：查更早的聊天、看公众号文章
     cmd = sys.argv[1:2]
     if cmd == ["articles"]:
@@ -485,24 +522,8 @@ if __name__ == "__main__":     # 给 Muse 用的命令行：查更早的聊天�
     if cmd == ["article"] and len(sys.argv) > 2:
         cli_article(sys.argv[2]); sys.exit()
     if cmd == ["video"] and len(sys.argv) > 3:   # wxtest 取视频交给 NotebookLM，处理中（202）就接着等
-        p = f"/video/ask?chat={quote(sys.argv[2])}&id={sys.argv[3]}&q={quote(' '.join(sys.argv[4:]))}&wait=55"
-        end = time.time() + 900
-        try:
-            while True:
-                _video_busy(sys.argv[2])
-                if "state" not in (r := api(p, timeout=70)) or time.time() >= end: break
-            _video_busy(sys.argv[2])   # 等完再刷一次：看图、写回复还要一会
-        except urllib.error.HTTPError as e:
-            sys.exit(f"没看成：{e.read().decode(errors='replace') if e.fp else e.msg}")
-        if "state" in r: sys.exit("还没处理完，过几分钟再跑一次")
-        if r.get("speech") is False:   # 没人声：画面存成图，Muse 自己看图脑补
-            import base64, tempfile
-            d = tempfile.mkdtemp(prefix=f"awx-video-{sys.argv[3]}-")
-            for f in r.get("frames", []):
-                t = int(f["t"]); open(os.path.join(d, f"{t // 60:02d}m{t % 60:02d}s.jpg"), "wb").write(base64.b64decode(f["b64"]))
-            print(f"这条视频没人声，时长 {r.get('duration')} 秒，按时间截了 {len(r.get('frames', []))} 张画面（文件名=第几分几秒），自己看图判断讲了什么：{d}")
-        else: print(r.get("answer"))
-        sys.exit()
+        video_answer(f"/video/ask?chat={quote(sys.argv[2])}&id={sys.argv[3]}&q={quote(' '.join(sys.argv[4:]))}&wait=55",
+                     sys.argv[3], lambda: _video_busy(sys.argv[2])); sys.exit()
     if cmd == ["voices"]:
         print(api("/voices")); sys.exit()
     if cmd == ["speak"] and len(sys.argv) > 3:
