@@ -25,6 +25,8 @@ def main():
     chat, name = hit[0]["username"], hit[0].get("name") or hit[0]["username"]
     if db.is_group(chat) and "--group" not in sys.argv:
         raise SystemExit(f"「{name}」是群，确认要发就加 --group")
+    if chat == me and awx.AGENT:                       # 回本人自聊：带上是哪台 agent 回的（代码加，不靠 AI 记得）
+        text = f"〔{awx.AGENT}〕{text}"
     ok, st, draft = awx.send(chat, text, me, db.is_group(chat))
     print(f"{'已发出' if ok else '没发出'}：{name}（{st}）" + (f"，输入框里有别人的字：{draft}" if draft else ""))
     sys.exit(0 if ok else 1)

@@ -5,6 +5,7 @@
   python3 watch.py setup    一键上岗：停旧值班（run_loop.sh/watch_loop.sh、crontab 里的开班）→ 装 systemd 服务（系统级优先，再试用户级）→ 装不上才装 crontab 保活 → 拉起 → 自检，最后打印平台 hook 要填的那一行
   python3 watch.py cron     只装 crontab 保活（每分钟 + 开机各跑一次 keepalive.py），不靠平台 hook；重复跑只留一份，值班在跑时丢了会自己补回
   python3 watch.py hook     平台 hook 每 10 秒跑这一句：systemd 服务重建丢了就重装 + 保活（up）+ 新任务只打印一次，其余时候什么都不输出；在哪个目录调用都行
+  python3 watch.py boot     开机钩子（init.sh）每次沙箱启动跑一次：unit 丢了装回、拉起值班（hook 每次顺手补装开机钩子，不用手动）
   python3 watch.py install  只装 systemd 服务（系统级优先，再试用户级；挂了 5 秒自动拉起、开机自启），装不上会说明
   python3 watch.py up       保活：没在跑就让 systemd 拉，没装服务就脱离当前会话在后台拉起一份（setsid），在跑就什么都不做
   python3 watch.py next     打印最早一条待处理任务（没有就什么都不输出）
@@ -15,7 +16,7 @@
 领到任务写进 inbox/<ID>.json，设置了 wake 就马上跑它叫醒 Muse，然后不再领下一条，直到 inbox 空了；等待期间续着 tick_at，后台心跳不会退出。
 wxtest 规定单条领走 5 分钟没交就收回，所以处理要快；处理不了也别拖，交 {} 或 done 掉，好让别的 agent 接。"""
 import fcntl, glob, json, os, re, subprocess, sys, time
-import db, keepalive, psync, sysd
+import boothook, db, keepalive, psync, sysd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 INBOX = os.path.join(HERE, "inbox")
@@ -178,6 +179,7 @@ def status_line():
 def setup():
     for d in stop_old(): print(d)
     systemd, msg = sysd.install(); print(msg)
+    if (b := boothook.ensure()): print(b)
     crontab = "有 systemd 托管，不装 crontab。" if systemd else keepalive.install(); print(crontab)
     up()
     for _ in range(10):
@@ -299,7 +301,9 @@ def main():
     elif a[0] == "up":
         up()
     elif a[0] == "hook":
-        sysd.heal(); up(); main_next(hook=True)
+        sysd.heal(); boothook.ensure(); up(); main_next(hook=True)
+    elif a[0] == "boot":                      # 开机钩子（init.sh）每次沙箱启动跑一次：unit 丢了装回、拉起值班
+        log("[boot] 沙箱启动，开机钩子拉值班"); sysd.heal(); up()
     elif a[0] == "setup":
         sys.exit(setup())
     elif a[0] == "cron":
