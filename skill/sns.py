@@ -13,7 +13,7 @@
   python3 sns.py reply <tid> <评论id> <<'EOF' … EOF   回复本人朋友圈下的某条评论
   python3 sns.py comment <tid> <<'EOF' … EOF  在本人的朋友圈下评论
   python3 sns.py delete <tid>                删除本人的一条朋友圈
-回复、评论、删除只能操作本人最近三天、带文字的朋友圈（电脑版微信只列这些）。"""
+回复、评论、删除只能操作本人最近三天的朋友圈（电脑版微信只列这些）；没文字的只支持纯图片。"""
 import sys, time
 import awx, db, reply_rules as rr
 

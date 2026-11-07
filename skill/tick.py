@@ -349,6 +349,20 @@ def digest_task(c, cfg):
     return {"kind": "群摘要", "chat": cfg["notify_to"], "alias": "群摘要", "title": cfg["title"], "context": "\n\n".join(parts),
             "act": f"python3 say.py {cfg['notify_to']}"}
 
+def owner_task(cfg, t):
+    """本人在自己跟自己的聊天里发的话（wxtest 已认过：本人手机发的文字，不是 AI 备注或通知开头）：原话 + 自聊最近几条，交给 Muse 照办。"""
+    me, sg = cfg["me_id"], (cfg["sign"] or "").strip()
+    mine = lambda m: (m.get("type") == 1 and m.get("sender_id") == me and not m.get("ai") and (m.get("content") or "").strip()
+                      and not m["content"].strip().startswith(("【助理通知】",) + ((sg,) if sg else ())))
+    msgs = t.get("messages") or []
+    said = [m["content"].strip() for m in msgs if t["from_id"] <= m["id"] <= t["upto"] and mine(m)]
+    if not said:
+        return None
+    earlier = [m for m in msgs if m["id"] < t["from_id"]][-10:]
+    return {"kind": "本人指令", "chat": me, "said": "\n".join(said),
+            "earlier": awx.transcript(earlier, me, cfg["me"] or cfg["title"], each=300, total=2000) if earlier else "",
+            "act": f"python3 say.py {me}"}
+
 def _remember(c, chat, recent, cfg, voice=None, ask=()):
     """回的是哪条、对方说了什么、要不要用语音回（用谁的声音），留给 act.py，它就不用再读一遍消息。"""
     rid = next((m["id"] for m in reversed(recent) if m.get("sender_id") != cfg["me_id"]), None)
@@ -519,6 +533,12 @@ def run(c, cfg):
             print(json.dumps({"tasks": [task]}, ensure_ascii=False))
         else:
             awx.task_done(t["id"], {"result": {"action": "notify" if NOTES else "none"}, **notes()})
+        return
+    if kind == "owner":                        # 本人自聊发的话 = 最高指令：交给 Muse 照办，回话用 act 发回自聊
+        task = owner_task(cfg, t)
+        awx.task_done(t["id"], {"result": {"action": "owner" if task else "none"}})
+        if task:
+            print(json.dumps({"tasks": [task]}, ensure_ascii=False))
         return
     if kind != "msg":                          # 旧版 wxtest 派来的撤回/好友等通知：新版 wxtest 自己发，这里不用管
         awx.task_done(t["id"], {"result": {"action": "none"}}); return

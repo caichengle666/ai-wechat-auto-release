@@ -14,16 +14,18 @@ def main():
     if not text:
         raise SystemExit("内容是空的")
     token = args[0]
+    c = db.conn(); db.init(c)
+    me = db.config(c)["me_id"]
     ss = awx.api("/sessions").get("sessions", [])
-    hit = [s for s in ss if s["username"] == token] or [s for s in ss if token in (s.get("name") or "")]
+    hit = [s for s in ss if s["username"] == token] or ([{"username": me, "name": "本人自聊"}] if token == me else
+                                                        [s for s in ss if token in (s.get("name") or "")])
     if len(hit) != 1:
         names = "、".join((s.get("name") or s["username"]) for s in hit[:5])
         raise SystemExit(f"「{token}」对上了 {len(hit)} 个" + (f"：{names}" if names else "") + "，说全一点或给微信号")
     chat, name = hit[0]["username"], hit[0].get("name") or hit[0]["username"]
     if db.is_group(chat) and "--group" not in sys.argv:
         raise SystemExit(f"「{name}」是群，确认要发就加 --group")
-    c = db.conn(); db.init(c)
-    ok, st, draft = awx.send(chat, text, db.config(c)["me_id"], db.is_group(chat))
+    ok, st, draft = awx.send(chat, text, me, db.is_group(chat))
     print(f"{'已发出' if ok else '没发出'}：{name}（{st}）" + (f"，输入框里有别人的字：{draft}" if draft else ""))
     sys.exit(0 if ok else 1)
 
