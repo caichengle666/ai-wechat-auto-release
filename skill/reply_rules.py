@@ -83,10 +83,23 @@ def person(prof, recent, cfg):
         p["owner_said"] = mine
     return p, awx.transcript(squash(recent[-30:]), cfg["me_id"], cfg["me"] or cfg["title"])
 
+INTENTS = ("chat", "tech", "price", "business", "sensitive")
+ALIAS = {"闲聊": "chat", "寒暄": "chat", "调侃": "chat", "技术": "tech", "专业": "tech", "常识": "tech",
+         "价格": "price", "问价": "price", "报价": "price", "正事": "business", "业务": "business",
+         "敏感": "sensitive", "看不懂": "unclear", "不清楚": "unclear", "拿不准": "unclear"}
+
+def intent_of(x):
+    """AI 偶尔把意图写成中文（「技术」「闲聊」）：换回英文代码；认不出的原样返回，由 decide 转告本人。"""
+    s = str(x or "").strip().lower()
+    return ALIAS.get(s, s)
+
 def decide(prof, intent, reply, cfg):
-    """返回 (动作, 正文)。动作：auto / draft / notify / skip。"""
-    if intent not in ("chat", "tech", "price", "business", "sensitive"):
-        return "skip", ""
+    """返回 (动作, 正文)。动作：auto / draft / notify / skip。unclear 和认不出的意图转告本人，绝不悄悄丢掉。"""
+    intent = intent_of(intent)
+    if intent not in INTENTS:
+        if intent != "unclear":
+            print(f"[intent] 认不出的意图「{intent[:20]}」，没回，转告本人", flush=True)
+        return "notify", ""
     risk = prof.get("risk") if prof.get("risk") in TABLE else "high"
     act = cfg.get("policy", {}).get((risk, intent)) or TABLE[risk][intent]   # 本人在 policy 里改过的格子优先
     if act == "hold":

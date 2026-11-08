@@ -94,6 +94,7 @@ def run(chat, media, sns_ref=None):
     if "intent" not in data and "reply" not in data:
         miss = str(data.get("missing") or "").strip()[:12]
         return {"result": {"action": "label" if lbs else "none", **({"labels": lbs} if lbs else {}), **({"missing": miss} if miss else {})}}
+    if "intent" in data: data = {**data, "intent": rr.intent_of(data["intent"])}   # 中文意图换回英文代码
     if sns_ref:                                    # 朋友圈评论：只回闲聊/技术，规矩见 sns.py
         tid, _, cid = sns_ref.partition(":")
         return sns.decide(c, chat, tid, int(cid), data, cfg)
@@ -117,6 +118,8 @@ def run(chat, media, sns_ref=None):
         out["send"] = {"text": text, "group": prof["is_group"], "reply_to": rid, "alias": name}
         if tk.get("voice"):                          # 对方发的语音：转语音发，用 tick.py 定的声音，结尾自报身份
             out["send"].update(voice=tk["voice"], tail=voices.tail(cfg, tk["voice"]))
+        elif (qid := quote_id(tk, data.get("quote"))) is not None:   # AI 要引用某句：wxtest 挂上引用再发
+            out["send"]["quote"] = qid
         if text == cfg["hold"]:
             out["notify_if_sent"] = note(f"{name} 问{'价格' if data.get('intent') == 'price' else '正事'}：「{said}」，"
                                          f"已回套话「{text}」，等你亲自回。")
@@ -133,8 +136,18 @@ def run(chat, media, sns_ref=None):
         print(f"[skip] {name}: 不回", flush=True)
     return with_ref(out, data)
 
+def quote_id(tk, words):
+    """AI 写的「quote: 被引用那句里的几个字」换成消息 id：在 tick.py 记下的最近消息里找含这几个字的，取最新一条；
+    对不上就不引用（照常发），记一行日志。空白不计。"""
+    w = "".join(str(words or "").split())
+    if not w: return None
+    for mid, text in reversed(tk.get("qs") or []):
+        if w in "".join(text.split()): return mid
+    print(f"[quote] 没找到「{w[:20]}」这句，不引用，照常发", flush=True)
+    return None
+
 def with_ref(out, data):
-    """Muse 用业务工具查到的参考（建议价、客户上次价、账款等）只给本人看：接在通知后面，绝不进发给对方的正文。"""
+    """Muse 用外部工具查到的参考（建议价、客户上次价、账款等）只给本人看：接在通知后面，绝不进发给对方的正文。"""
     ref = " ".join(str(data.get("ref") or "").split())[:300]
     if not ref: return out
     for k in ("notify", "notify_if_sent"):

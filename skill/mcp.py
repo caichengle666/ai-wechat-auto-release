@@ -6,8 +6,26 @@
   python3 mcp.py 服务名 工具名 '{"参数":"值"}'      调一个工具，打印结果（JSON）
   python3 mcp.py 服务名 工具名 <<'EOF' … EOF       参数长或带引号时用 heredoc 喂 JSON
 什么时候用、哪些事不许用它做，看 SKILL.md「外部工具」。"""
-import json, sys
+import json, os, sys, tempfile, time
 import awx
+
+CACHE, TTL = os.path.join(tempfile.gettempdir(), f"awx-tools-{os.getuid()}.json"), 600
+
+def brief():
+    """接了哪些服务、各自干什么（「名字：说明」列表，一个服务一行，工具再多也只一行），给任务包的 tools 字段用。缓存 10 分钟，省得每条任务都问 wxtest；问不到就当没接，不耽误回消息。"""
+    try:
+        v = json.load(open(CACHE, encoding="utf-8"))
+        if time.time() - v["at"] < TTL: return v["tools"]
+    except (OSError, ValueError, KeyError, TypeError): pass
+    try: s = awx.api("/mcp", timeout=10, tries=1).get("servers") or []
+    except Exception as e: print(f"[mcp] 取外部工具清单失败：{e!r}", file=sys.stderr); return []
+    tools = [f"{x['name']}：{x['note']}" if x.get("note") else f"{x['name']}：{x['intro']}" if x.get("intro") else x["name"]
+             for x in s if not x.get("off")]          # 本人写的说明优先，没写用服务自带开篇说明第一句，都没有只给名字
+    try:
+        with open(CACHE + ".tmp", "w", encoding="utf-8") as f: json.dump({"at": time.time(), "tools": tools}, f, ensure_ascii=False)
+        os.replace(CACHE + ".tmp", CACHE)
+    except OSError as e: print(f"[mcp] 清单缓存写不进：{e!r}", file=sys.stderr)
+    return tools
 
 MARK = {"read": "", "write": "〔改〕", "danger": "〔删〕", "": ""}
 

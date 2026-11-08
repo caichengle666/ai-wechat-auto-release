@@ -3,14 +3,22 @@
 """本人让你代发一条消息时用，一条命令搞定：按名字找会话 → 发送 → 等结果。别自己一步步查状态、找人、翻消息。
 用法：python3 say.py <备注/昵称里的几个字 或 微信号> [--group]，要发的内容从标准输入给（heredoc，可多行）。
 备注由wxtest自动加。发群要加 --group。"""
-import sys
+import json, sys
 import awx, db
+
+def unwrap(text):
+    """误把交给 act 的 JSON（{"reply": ...}）整段喂进来：只取 reply，免得把花括号和 \\n 原样发出去。"""
+    if text.startswith("{"):
+        try: d = json.loads(text)
+        except ValueError: return text
+        if isinstance(d, dict) and isinstance(d.get("reply"), str) and d["reply"].strip(): return d["reply"].strip()
+    return text
 
 def main():
     args = [a for a in sys.argv[1:] if a != "--group"]
     if len(args) != 1:
         raise SystemExit(__doc__)
-    text = sys.stdin.read().strip()
+    text = unwrap(sys.stdin.read().strip())
     if not text:
         raise SystemExit("内容是空的")
     token = args[0]

@@ -8,7 +8,7 @@ Muse 写出 JSON 后执行任务里的 act 命令；不回就当场交回。设�
 文件传输助手里本人发的管理命令、别人撤回消息、朋友圈评论、微信掉线/恢复、每晚日报也都是 wxtest 派的任务（掉线卡住它自己重启微信）；
 这里定措辞，掉线告警按 settings.json 的 alert 走 Bark/邮件/webhook/Muse。wxtest 本身连不上时这里自己报。"""
 import json, os, sys, time
-import alert, awx, db, persona, psync, reply_rules as rr, skillup, sns, voices
+import alert, awx, db, mcp, persona, psync, reply_rules as rr, skillup, sns, voices
 
 WAIT = 18                 # 没活干时挂在 wxtest 上等任务的秒数（来活立刻返回）
 ALERT_EVERY = 1800        # wxtest 一直连不上时，每 30 分钟再提醒一次
@@ -359,7 +359,8 @@ def owner_task(cfg, t):
     if not said:
         return None
     earlier = [m for m in msgs if m["id"] < t["from_id"]][-10:]
-    return {"kind": "本人指令", "chat": me, "said": "\n".join(said),
+    tools = mcp.brief()
+    return {"kind": "本人指令", "chat": me, "said": "\n".join(said), **({"tools": tools} if tools else {}),
             "earlier": awx.transcript(earlier, me, cfg["me"] or cfg["title"], each=300, total=2000) if earlier else "",
             "act": f"python3 say.py {me}"}
 
@@ -368,7 +369,9 @@ def _remember(c, chat, recent, cfg, voice=None, ask=()):
     rid = next((m["id"] for m in reversed(recent) if m.get("sender_id") != cfg["me_id"]), None)
     said = next(((m.get("content") or "")[:60] if m.get("type") == 1 else "[非文字]"
                  for m in reversed(recent) if m["id"] == rid), "")
-    db.meta_set(c, "task:" + chat, json.dumps({"rid": rid, "said": said, "voice": voice, "ask": list(ask)}, ensure_ascii=False))
+    qs = [[m["id"], (m.get("content") or "")[:200]] for m in recent[-30:]          # AI 想引用某句时，act.py 按原话在这里找 id
+          if m.get("type") == 1 and not m.get("ai") and (m.get("content") or "").strip()]
+    db.meta_set(c, "task:" + chat, json.dumps({"rid": rid, "said": said, "voice": voice, "ask": list(ask), "qs": qs}, ensure_ascii=False))
 
 def _build(c, chat, name, cfg, recent, new, tags=(), remark=None, called=False):
     # 机器人对聊、刷屏、勿回、拍一拍、本人在聊、群里没叫到本人：wxtest 派任务前已经处理掉了
@@ -391,6 +394,8 @@ def _build(c, chat, name, cfg, recent, new, tags=(), remark=None, called=False):
         t["my_names"] = cfg["names"]
     if cfg["redlines"]:
         t["redlines"] = cfg["redlines"]
+    if ok and (tools := mcp.brief()):        # 本人接的外部工具：能查到更准答案的事先查再回
+        t["tools"] = tools
     if ok:                                  # 更早的聊天：照本人以前怎么跟 TA 聊来回，知道前因后果
         e = awx.earlier(chat, recent, cfg["me_id"], cfg["me"] or cfg["title"], n=60 if prof["is_group"] else 150)
         if e:
@@ -454,7 +459,7 @@ def push_filter(c, cfg):
          "group_all": sorted(r["chat"] for r in rows if r["reply_when"] == "all" and db.is_group(r["chat"])),
          "names": cfg["names"], "merge": cfg["merge_sec"], "per_hour": cfg["per_hour"], "pat": cfg["pat"], "card": cfg["card"], "bot_mute_min": cfg["bot_mute_min"], "handoff_min": cfg["handoff_min"],
          "notify_to": cfg["notify_to"], "recall": cfg["recall"], "pending_max_min": cfg["pending_max_min"],
-         "draft_wait": cfg["draft_wait"], "report_hour": cfg["report_hour"], "tz": time.localtime().tm_gmtoff,
+         "draft_wait": cfg["draft_wait"], "report_hour": cfg["report_hour"], "tz": 8 * 3600,
          "sns": cfg["sns"], "friend": cfg["friend"], "like": cfg["like"], "like_every": cfg["like_every"], "catchup_min": cfg["catchup_min"],
          "sync_min": cfg["sync_min"], "autolabel": db.labels_on(cfg), "pver": int(db.meta(c, "psync_cursor") or 0), "pepoch": db.meta(c, "psync_epoch")}
     h = json.dumps(f, ensure_ascii=False, sort_keys=True)

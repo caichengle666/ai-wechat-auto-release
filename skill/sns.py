@@ -85,7 +85,7 @@ def decide(c, chat, tid, cid, data, cfg):
         return {"result": {"action": "skip", "intent": intent, "why": "已回过"}}
     act, text = rr.decide(prof, intent, text, cfg)
     if intent not in ("chat", "tech") or act in ("notify", "skip") or text == cfg["hold"]:
-        act = "notify" if intent in ("price", "business", "sensitive") else "skip"
+        act = "skip" if intent in ("chat", "tech") else "notify"   # 正事、unclear、认不出的都转告本人
     out = {"result": {"action": act, "intent": intent}}
     if act == "auto":
         out["comment"] = {"tid": str(tid), "reply_to": cid, "text": text}
