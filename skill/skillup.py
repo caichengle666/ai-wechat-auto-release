@@ -1,7 +1,7 @@
 """从 wxtest 拉它镜像自带的那版 skill，覆盖本目录（wxtest 发现本机落后时派 kind=update，tick.py 领到就做；手动：python3 watch.py update）。
 本人 11-03 授权：这是唯一允许自动改 skill 代码的路子。只换仓库里的代码和文档；settings.json、awx.env、store.db、rules/<人>.md 等本机数据一律不动。
 步骤：先全写进临时目录核对指纹、全部 .py 能编译，再把旧文件备份到 .bak/<时间>/（留 3 份）逐个替换；替换后指纹不对就整份恢复。"""
-import os, sys, time, shutil, tempfile
+import json, os, sys, time, shutil, tempfile, difflib
 import awx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -57,9 +57,45 @@ def run(want="", here=None, api=None):
             return {"ok": False, "why": f"换完指纹是 {now} 不是 {build}，已恢复原样（备份 {os.path.basename(bak)}）"}
         _prune(os.path.join(here, ".bak"))
         print(f"[update] skill {old} → {build}：改 {len(changed)} 个、删 {len(removed)} 个，旧文件备份在 .bak/{os.path.basename(bak)}", file=sys.stderr)
-        return {"ok": True, "build": build, "from": old, "changed": changed, "removed": removed}
+        return {"ok": True, "build": build, "from": old, "changed": changed, "removed": removed, "bak": bak}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+CAP = 8000   # 给 AI 的改动原文最多这么多字，超了只列文件名，让它自己去读全文
+
+def _read(p):
+    try: return open(p, encoding="utf-8", errors="replace").read()
+    except OSError: return ""
+
+def brief(r, here=None, agent=""):
+    """升级成功后：给本人的一句通知 + 要叫醒 AI 的任务（只放事实字段；文档没变返回 None）。
+    文档 = SKILL.md、docs/ styles/ 下的 .md、rules/_example.md：AI 会话里读的是旧版，要它重读；只改代码下一轮自动生效，不叫醒。"""
+    here = here or HERE
+    ch, rm = r.get("changed") or [], r.get("removed") or []
+    if not ch and not rm: return None, None
+    docs = [f for f in ch + rm if f.endswith(".md")]
+    code = [f for f in ch + rm if f not in docs]
+    names = "、".join((ch + rm)[:6]) + (f" 等 {len(ch) + len(rm)} 个" if len(ch) + len(rm) > 6 else "")
+    note = f"{agent or '本机'} skill 已升级（{r.get('from')} → {r.get('build')}），改了 {names}" + ("；已叫醒 AI 重读改过的说明。" if docs else "；只改代码，AI 不用重读。")
+    if not docs: return note, None
+    diff, cut = [], False
+    for f in docs:
+        old, new = _read(os.path.join(r.get("bak") or "", f)), _read(os.path.join(here, f))
+        d = "".join(difflib.unified_diff(old.splitlines(True), new.splitlines(True), f"旧/{f}", f"新/{f}", n=1))
+        if sum(map(len, diff)) + len(d) > CAP: cut = True; continue
+        diff.append(d)
+    task = {"kind": "skill升级", "from": r.get("from"), "build": r.get("build"), "docs": docs, "code": code,
+            "diff": "".join(diff), "diff_cut": cut}
+    return note, task
+
+def mark_unread(task, here=None):
+    """记下这次说明改动还没读（awx.UNREAD）：每个请求报 X-Unread，wxtest 10 分钟没读告诉本人；
+    AI 处理掉 skill升级 任务（watch done）就删；任务被值班丢掉（超时）的话，下一条任务附上改动原文（watch.next）。"""
+    p = os.path.join(here or HERE, os.path.basename(awx.UNREAD))
+    try:
+        with open(p + ".tmp", "w", encoding="utf-8") as f: json.dump(task, f, ensure_ascii=False)
+        os.replace(p + ".tmp", p)
+    except OSError as e: print(f"[update] 记「说明没读」失败：{e}", file=sys.stderr)
 
 def _restore(here, bak, added):
     for root, _, fs in os.walk(bak):

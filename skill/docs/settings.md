@@ -74,7 +74,7 @@
 | `catchup_min` | 消息晚到多少分钟算补收：微信掉线、重登后补同步下来的积压，不自动回（免得过半小时对着旧话题连回一串），wxtest 攒齐后往文件传输助手发一条汇总（谁几条、有没有叫到你）。用场：常掉线时调大，想更严调小 | 30 |
 | `wake` | `watch.py` 领到任务后立刻执行的一条 shell 命令，用来马上叫醒 Muse（填 Muse 平台自己的唤醒方式，比如调它的 webhook 或 CLI）；命令里可用环境变量 `AWX_TASK_ID`、`AWX_TASK_FILE`。10 秒没跑完就杀掉，失败写进 `watch.log`，hook 定时跑 `watch.py hook` 照样兜底。空 = 只靠 hook | 空 |
 | `sync_min` | 多台 agent 时画像和 rules/ 即时同步（哪台改了马上推，wxtest 马上给其余在线的下放，掉线回来先对齐）；这一项是兜底：每隔这么多分钟（且没有待回消息时）再对齐一次。一次只一台在做；干活只读本地。0 = 本机不参加同步 | 30 |
-| `alert` | 微信掉线时怎么提醒本人（这时微信发不出去），可多选逗号分隔：`serverchan:SendKey`（Server酱，推到微信服务号，免费每天 5 条）、`bark:https://api.day.app/key`、`mail:邮箱`（另给 Muse 配 `SMTP_HOST` `SMTP_PORT` `SMTP_USER` `SMTP_PASS` 环境变量，密码不写文件）、`webhook:网址`、`muse`（Muse 用自己的渠道转告）。填好跑 `python3 alert.py test` 让用户确认收到。AI 助理全部断开、没人在线时微信掉线，wxtest 自己按这里的 serverchan/bark/webhook 推（muse、mail 它发不了）；控制面板「通知」里能分开填、点「发一条试试」 | muse |
+| `alert` | 微信掉线时怎么提醒本人（这时微信发不出去），可多选逗号分隔：`serverchan:SendKey`（Server酱，推到微信服务号，免费每天 5 条）、`bark:https://api.day.app/key`、`mail:邮箱`（另给 Muse 配 `SMTP_HOST` `SMTP_PORT` `SMTP_USER` `SMTP_PASS` 环境变量，密码不写文件）、`webhook:网址`、`muse`（Muse 用自己的渠道转告）。填好跑 `python3 alert.py test` 让用户确认收到。微信掉线和恢复时，不管 AI 助理在不在线，wxtest 都自己推这里的 serverchan/bark/webhook 和控制面板绑了的手机推送，配了几种推几种（muse、mail 它发不了，由 AI 助理推，wxtest 推过的不重复推）；控制面板「通知」里能分开填、点「发一条试试」 | muse |
 
 ## 四、AI 什么时候接手、等多久
 | 字段 | 干什么用 / 什么场景改 | 默认 |
@@ -103,7 +103,7 @@
 | 字段 | 干什么用 / 什么场景改 | 默认 |
 |---|---|---|
 | `vision` | Muse 用的模型能不能看图：`on` 对方发的图片和表情（动图抽帧拼成一张）交给 Muse 看，`off` 只显示 [图片]、[表情]。问用户 TA 给 Muse 配的模型支不支持看图，不确定填 `off` | off |
-| `agent` | 这台 agent 的名字，**必须由用户起**，几台各不相同（wxtest 不替它取；没填不领任务，wxtest 会发文件传输助手提醒；两台同名也会提醒）。各机自留，不同步 | 无，必填 |
+| `agent` | 这台 agent 的名字，**必须由用户起**，几台各不相同（wxtest 不替它取；没填不领任务，wxtest 会发文件传输助手提醒；两台同名时只给先来的派任务，并提醒改名）。各机自留，不同步 | 无，必填 |
 
 ## 八、wxtest那边的限制（装wxtest时用 `docker run -e` 设，不在 settings.json）
 - `WX_CHAT_GAP`：同一个人两条消息至少隔几秒，默认 20。

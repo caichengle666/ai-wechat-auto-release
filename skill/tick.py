@@ -12,6 +12,7 @@ import alert, awx, db, mcp, persona, psync, reply_rules as rr, skillup, sns, voi
 
 WAIT = 18                 # 没活干时挂在 wxtest 上等任务的秒数（来活立刻返回）
 ALERT_EVERY = 1800        # wxtest 一直连不上时，每 30 分钟再提醒一次
+DUP_WAIT = 60             # 重名被停派时隔多久再问（改了名就能接着领）
 API_DOWN = 120            # 连不上 wxtest 多久才报（防网络抖动误报）
 RISK_LOGOUTS = 3          # 24 小时内掉线达到这个次数，恢复时提醒疑似登录风控
 NOTES = []                # 这条任务要发给本人的通知，交任务时一起交给 wxtest 发
@@ -49,9 +50,26 @@ def reach(c, err=None):
     muse, _ = alert.send(db.meta(c, "alert"), "连不上微信接口", text)
     return _muse_alert(text) if muse else None
 
+def dup_name(c, e):
+    """本机名字和别台重了（wxtest 只给先来的派任务）：每 ALERT_EVERY 告诉本人一次去改名。返回要 Muse 转告的任务或 None。"""
+    now = int(time.time())
+    if now - int(db.meta(c, "dup_alert") or 0) < ALERT_EVERY: return None
+    db.meta_set(c, "dup_alert", str(now))
+    try: why = json.loads(e.read()).get("why") or ""
+    except (ValueError, AttributeError, OSError) as x:
+        print(f"[task] 读重名说明失败：{x}", file=sys.stderr); why = ""
+    text = why or "本机 agent 名字和另一台重了，wxtest 已停止给本机派任务。请在 settings.json 改 agent（每台不同），再跑 seed.py"
+    muse, _ = alert.send(db.meta(c, "alert"), "agent 名字重了", text)
+    return _muse_alert(text) if muse else None
+
+def _left(c, pushed):
+    """alert 设置里 wxtest 还没推过的渠道（它推过的 serverchan/bark/webhook 不重复推）。"""
+    return ",".join(x for x in alert.channels(db.meta(c, "alert")) if x.partition(":")[0] not in pushed)
+
 def login_task(c, cfg, t):
-    """wxtest 派来的掉线（alert）/恢复（up）任务。"""
+    """wxtest 派来的掉线（alert）/恢复（up）任务。info.pushed = wxtest 已推过的渠道（phone 是控制面板绑的手机推送）。"""
     i = t.get("info") or {}
+    pushed = set(i.get("pushed") or [])
     if t["kind"] == "alert" and i.get("text"):   # wxtest 自己的故障（卡死自动重载等），不是掉线
         muse, _ = alert.send(db.meta(c, "alert"), "微信助理出故障", i["text"])
         awx.task_done(t["id"], {"result": {"action": "alert"}})
@@ -59,17 +77,18 @@ def login_task(c, cfg, t):
     if t["kind"] == "alert":
         qr, down = f"{awx.BASE}/qr?token={awx.TOKEN}", "微信掉线了，需要扫码或在手机上确认登录"
         text = f"{down}，已有约 {i.get('mins', 1)} 分钟，期间 AI 不回任何消息。"
-        muse, _ = alert.send(db.meta(c, "alert"), "微信掉线了", text + "打开链接扫码：", qr)
+        left = _left(c, pushed)
+        muse = bool(left) and alert.send(left, "微信掉线了", text + "打开链接扫码：", qr)[0]
         awx.task_done(t["id"], {"result": {"action": "alert"}})
         return _muse_alert(text, qr) if muse else None
     msg = f"微信已恢复（断了约 {i.get('mins', 1)} 分钟），AI 已接回。"
     if i.get("logouts_24h", 0) >= RISK_LOGOUTS:          # 一天内频繁掉线：疑似登录风控，提醒本人
         msg += (f" 注意：最近 24 小时掉线 {i['logouts_24h']} 次，疑似登录风控。"
                 "建议别频繁切设备登录，或开 WX_PROXY 走固定住宅出口 IP。")
-    ext = [x for x in alert.channels(db.meta(c, "alert")) if x != "muse"]
+    ext = [x for x in alert.channels(_left(c, pushed)) if x != "muse"]   # 剩空串时 channels 给 muse，过滤后为空
     if ext:
         alert.send(",".join(ext), "微信已恢复", msg)
-    say(cfg, msg)
+    if "phone" not in pushed: say(cfg, msg)       # 手机已推过就不再发通知（发通知也会推手机，重复）
     awx.task_done(t["id"], {"result": {"action": "notify"}, **notes()})
     return None
 
@@ -492,6 +511,10 @@ def run(c, cfg):
         t = awx.api(f"/next_task?wait={WAIT}&ctx=30&sync={int(cfg['sync_min'] > 0)}", timeout=WAIT + 12).get("task")
     except Exception as e:
         print(f"[task] {e}", file=sys.stderr)
+        if getattr(e, "code", 0) == 409 and "dup_name" in str(getattr(e, "msg", "")):   # wxtest 确认本机和别台重名，停派任务
+            reach(c); a = dup_name(c, e)
+            if a: print(json.dumps({"tasks": [a]}, ensure_ascii=False))
+            time.sleep(DUP_WAIT); return
         a = reach(c, e)
         if a:
             print(json.dumps({"tasks": [a]}, ensure_ascii=False))
@@ -508,7 +531,14 @@ def run(c, cfg):
         try: r = skillup.run(info.get("build", ""))
         except Exception as e: r = {"ok": False, "why": f"{type(e).__name__}: {e}"}
         print(f"[update] {r if not r.get('ok') else {k: r[k] for k in ('from', 'build')}}", file=sys.stderr)
-        awx.task_done(t["id"], {"result": r} if r.get("ok") else {"skip": str(r.get("why", ""))[:200]}); return
+        note, task = skillup.brief(r, agent=awx.AGENT) if r.get("ok") else (None, None)
+        if task:                             # 先记下「说明没读」再交：交的时候被收回（409）也不丢叫醒（实测出现过：交的时候被收回，没叫醒）
+            skillup.mark_unread(task); print(json.dumps({"tasks": [task]}, ensure_ascii=False))
+        if note: say(cfg, note)              # 本人 11-09：升级了要告诉本人，也要告诉 AI 改了什么（随交结论带给 wxtest 发）
+        r.pop("bak", None)
+        try: awx.task_done(t["id"], {"result": r, **notes()} if r.get("ok") else {"skip": str(r.get("why", ""))[:200]})
+        except Exception as e: print(f"[update] 交升级结果失败（文件已换好）：{e}", file=sys.stderr)
+        return
     if kind in ("alert", "up"):
         a = login_task(c, cfg, t)
         if a:

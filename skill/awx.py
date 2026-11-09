@@ -56,6 +56,27 @@ IID = _meta_once("agent_iid", lambda: uuid.uuid4().hex[:8])
 H = {"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json", "X-Agent": quote(AGENT), "User-Agent": "Mozilla/5.0 awx",
      "X-Agent-Id": IID, "X-Build": BUILD, "X-Host": quote(socket.gethostname())}
 
+UNREAD = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".skill_unread.json")   # 升级改了说明、AI 还没读：skill升级 任务原样存这（tick 写，watch 读过就删）
+
+_stale = {"t": 0, "v": False}
+def stale():
+    """这个进程跑的代码已经不是磁盘上的了（升级换了文件、本进程还没退）：报 X-Stale，wxtest 当收尾中的旧进程，不当没退。5 秒算一次。"""
+    if time.time() - _stale["t"] > 5:
+        _stale.update(t=time.time(), v=_build() != BUILD)
+    return _stale["v"]
+
+def bye():
+    """旧进程退出前报到（X-Bye）：wxtest 马上不再把这个指纹算在报，面板清掉。报不上不要紧（3 分钟没再出现也会清）。"""
+    try: api("/status", timeout=10, tries=2, extra={"X-Bye": "1"}); return True
+    except Exception as e:
+        print(f"[awx] 退出报到没报上：{e}", file=sys.stderr, flush=True); return False
+
+def unread():
+    """没读的说明版本（报给 wxtest 的 X-Unread；空 = 都读过）。"""
+    try: return str(json.load(open(UNREAD, encoding="utf-8")).get("build") or "?")[:16]
+    except FileNotFoundError: return ""
+    except (OSError, ValueError) as e: print(f"[awx] 读 {UNREAD} 失败：{e}", file=sys.stderr, flush=True); return "?"
+
 PIECE = 1400   # 回包压缩后超过这么大就让 wxtest 切块（Muse 沙箱出口传途中随时断，11-03 实测 1.5KB 八九成能过、7KB 以上全断）
 PIECE_WAIT = 6   # 一块 1.4KB 正常半秒内到；但 24 路同时新建连接时 Muse 出口建连可能要好几秒，2 秒太紧（11-03 0ac3045 实测块全卡在 3 秒超时），回到 6 秒
 PIECE_PAR = 4    # 取块几路并行：Muse 出口上同时开 24 路每块都要约 6 秒，单路复用连接每块 0.2 秒（11-03 实测）
@@ -146,13 +167,14 @@ def _decode(path, code, hd, raw, hdr):
         raise urllib.error.HTTPError(BASE + path, code, raw.decode(errors="replace")[:200], hd, io.BytesIO(raw))
     return json.loads(raw)
 
-def api(path, body=None, timeout=30, tries=6, waits=20):
+def api(path, body=None, timeout=30, tries=6, waits=20, extra=None):
     """调 wxtest。要 gzip 回包，压缩后还大就让 wxtest 切块（X-Piece），首块随回、其余 PIECE_PAR 路并行取（每路一条长连接），断了只重取那块。
     任何网络错误（建隧道被掐、截断、断连、超时）都退避重试，有 curl 时单双次轮流用 urllib 和 curl；wxtest 回的 HTTP 错误码不重试。
     POST 和领任务（/next_task）每次调用带一个编号 X-Req-Id，重试用同一个（领到的回包被掐，重领拿回同一条，不会白占 5 分钟）：wxtest 做过的直接回上次结果、不会做两遍（发消息、交结论都能放心重交）；
     还在做回 {"pending": true}，等一下用同一编号再问（最多 waits 次）；wxtest 重载丢了半截回 409 lost，由调用方查明再定。"""
     data = json.dumps(body, ensure_ascii=False).encode() if body is not None else None
-    hdr = dict(H, **{"Accept-Encoding": "gzip", "X-Piece": str(PIECE)}, **({"X-Req-Id": uuid.uuid4().hex} if data or path.startswith("/next_task") else {}))
+    hdr = {**H, "Accept-Encoding": "gzip", "X-Piece": str(PIECE), "X-Unread": unread(), **({"X-Req-Id": uuid.uuid4().hex} if data or path.startswith("/next_task") else {}),
+           **({"X-Stale": "1"} if stale() else {}), **(extra or {})}
     curl, i = shutil.which("curl"), 0
     while True:
         try:

@@ -97,8 +97,30 @@ def stop(tid, why):
         except OSError: pass
     log(f"[watch] {tid} 已不归本机，叫停：{why}")
 
-def done(tid):
+UNREAD = os.path.join(HERE, ".skill_unread.json")   # 同 awx.UNREAD：升级改了说明、AI 还没读（tick 写）
+
+def _kind(path):
+    """收件箱里这条是什么任务（tick 打印的是 {"tasks": [...]}）。"""
+    try: d = json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError): return None
+    ts = d.get("tasks") if isinstance(d, dict) else None
+    return (ts[0].get("kind") if ts and isinstance(ts[0], dict) else None) or (d.get("kind") if isinstance(d, dict) else None)
+
+def _via():   # 改动原文附在哪条任务里给过处理员
+    try: return json.load(open(UNREAD, encoding="utf-8")).get("via")
+    except (OSError, ValueError): return None
+
+def read_ok(why):
+    try: os.remove(UNREAD); log(f"[watch] 新说明已读（{why}）")
+    except FileNotFoundError: pass
+    except OSError as e: log(f"[watch] 删 {UNREAD} 失败：{e}")
+
+def done(tid, read=True):
+    """read=False：值班超时丢掉的，不算处理员读过。"""
     tid = os.path.basename(tid).removesuffix(".json")
+    if not read: pass
+    elif _kind(os.path.join(INBOX, f"{tid}.json")) == "skill升级": read_ok("skill升级 已处理")
+    elif _via() == tid: read_ok(f"附了改动原文的 {tid} 已处理")
     for p in (os.path.join(INBOX, f"{tid}.json"), shown(tid), started(tid), gone(tid)):
         try: os.remove(p)
         except OSError: pass
@@ -212,16 +234,16 @@ def loop():
     log("[watch] 开始值班")
     try: import awx                             # 没令牌时 awx import 就退出：那就不查升级，值班照跑
     except SystemExit: awx = None; log("[watch] awx 起不来（没令牌？），不查代码升级")
-    build, checked, trimmed = awx and awx.BUILD, time.time(), 0
+    build, trimmed = awx and awx.BUILD, 0
     while True:
         if time.time() - trimmed > 60: trimmed = time.time(); trim_log()
         if not SYSTEMD and yield_asked():
             log("[watch] systemd 那份在等，让位退出"); return
         keepalive.heal()                        # 装过 crontab 保活的：重建后守护没起、行丢了就补回
-        if awx and time.time() - checked > 60 and not pending():   # skill 升级了（拉了新代码）：手里没活时退出，hook 10 秒内用新代码拉起
-            checked = time.time()
-            if awx._build() != build:
-                log(f"[watch] skill 代码换了（{build} → {awx._build()}），退出让 hook 用新代码重拉"); return
+        if awx and not pending() and awx._build() != build:   # skill 升级了：手里没活马上退（每轮都查，旧代码不再发请求），hook 10 秒内用新代码拉起
+            log(f"[watch] skill 代码换了（{build} → {awx._build()}），退出让 hook 用新代码重拉")
+            if hasattr(awx, "bye"): awx.bye()             # 报到：wxtest 面板马上清掉这个旧指纹
+            return
         try:
             step(c)
         except Exception as e:                  # 什么错都不许把值班循环弄死
@@ -264,7 +286,7 @@ def step(c):
                 return
         if ago > STALE and not (busy(tid) and ago < VIDEO_MAX):
             log(f"[watch] {os.path.basename(p[0])} 超过 {STALE} 秒没处理完（wxtest 已收回改派），丢弃；请查处理员为什么没处理")
-            done(p[0]); return
+            done(p[0], read=False); return
         db.meta_set(c, "tick_at", str(int(time.time())))   # 手里有活，心跳别退
         time.sleep(2); return
     maybe_urgent(c)
@@ -285,7 +307,17 @@ def main_next(hook=False):
         mark(tid)
     if p:
         tid = os.path.basename(p[0])[:-5]
-        print(json.dumps({"id": tid, **json.load(open(p[0], encoding="utf-8"))}, ensure_ascii=False))   # 只放事实：必须以 act 收尾等规矩在 SKILL.md（命令口吻进输出会被平台安全检查拦）
+        t = {"id": tid, **json.load(open(p[0], encoding="utf-8"))}
+        if not any(_kind(x) == "skill升级" for x in p):   # skill升级 被丢了还没读：改动原文附在这条里
+            try:
+                u = json.load(open(UNREAD, encoding="utf-8"))
+                t["skill升级"] = {k: v for k, v in u.items() if k not in ("kind", "via")}
+                if u.get("via") != tid:        # 这条处理完（done）才算读过
+                    with open(UNREAD + ".tmp", "w", encoding="utf-8") as f: json.dump(dict(u, via=tid), f, ensure_ascii=False)
+                    os.replace(UNREAD + ".tmp", UNREAD)
+            except FileNotFoundError: pass
+            except (OSError, ValueError) as e: log(f"[watch] 读 {UNREAD} 失败：{e}")
+        print(json.dumps(t, ensure_ascii=False))   # 只放事实：必须以 act 收尾等规矩在 SKILL.md（命令口吻进输出会被平台安全检查拦）
 
 def main():
     a = sys.argv[1:]
