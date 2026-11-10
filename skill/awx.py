@@ -220,6 +220,16 @@ def messages(chat, limit=30, before=0):
     """最近 limit 条；before 给消息 id 就取它之前的（往前翻；迁移来的老记录 id 是负数）。"""
     return api(f"/messages?chat={urllib.parse.quote(chat)}&limit={limit}&before={before}").get("messages", [])
 
+def find_chat(name):
+    """微信号原样返回；名字在会话列表（备注/昵称/群名）里找：完全一样的优先，否则包含这几个字的，唯一才算，多个或没有抛 LookupError 列出来。"""
+    if name.startswith(("wxid_", "gh_")) or name.endswith("@chatroom") or name == "filehelper": return name
+    ss = api("/sessions").get("sessions", [])
+    hit = [s for s in ss if s.get("name") == name or s["username"] == name] or [s for s in ss if name in (s.get("name") or "")]
+    if len(hit) == 1: return hit[0]["username"]
+    if not hit and name.isascii() and " " not in name: return name   # 老式微信号（不带 wxid_）
+    if not hit: raise LookupError(f"会话列表里没有「{name}」，换个叫法或直接给微信号")
+    raise LookupError(f"「{name}」不止一个，写微信号：" + "；".join(f"{s.get('name')}={s['username']}" for s in hit[:10]))
+
 def search(words, chat="", limit=20):
     """搜聊天记录：words 空格分开的关键词都要有；chat 空就搜所有会话。每条带前后两条上下文。"""
     return api(f"/search?q={urllib.parse.quote(words)}&chat={urllib.parse.quote(chat)}&limit={limit}", timeout=60)
@@ -306,6 +316,13 @@ def _post(path, body, timeout):   # 409 等错误码也带 JSON（中止原因�
 
 def sent(chat, text, me_id, n=10):
     return any(m.get("sender_id") == me_id and (m.get("content") or "").endswith(text) for m in messages(chat, n))   # wxtest可能在前面补了备注
+
+def forward(chat, ids, to, merge=None, wait=300):
+    """用微信自己的「转发」把 chat 里的这几条转到 to（username 或备注/群名）。merge 不给：一条直接转，多条合并成聊天记录卡片。
+    返回 (ok, 状态)。拿不到结果不重转（wxtest 10 分钟内同一批也只转一次）。"""
+    if not ids: return False, "没有要转的消息"
+    r = call("/forward", {"chat": chat, "ids": list(ids), "to": to, "merge": len(ids) > 1 if merge is None else bool(merge), "allow_group": True}, wait)
+    return (bool(r.get("ok")), r.get("status") or r.get("error")) if r else (False, "没拿到转发结果，没重转")
 
 def send(chat, text, me_id, group=False, allow_draft=None, reply_to=None, wait=300):
     """发一次，绝不盲目重发：拿不到结果（断网、wxtest重载）就查消息确认发没发出。
@@ -449,8 +466,8 @@ def attach_images(msgs, chat, limit=3):
             break
     return list(reversed(out))
 
-def transcript(msgs, me_id, me, each=500, total=3000):
-    """把消息拼成对话文本：只要文字，图片/表情等写成占位。单条超 each 字截断，总长超 total 只留最近的（防刷长文烧 token）。
+def transcript(msgs, me_id, me, each=500, total=3000, ids=False):
+    """把消息拼成对话文本（ids=True 每行前面带消息 id，给本人指令里查消息、转发用）：只要文字，图片/表情等写成占位。单条超 each 字截断，总长超 total 只留最近的（防刷长文烧 token）。
     本人号上 AI 发的（带 ai）写成「<me>的助理」，不和本人亲口说的混在一起（画像、学说话风格都不能拿 AI 的话当本人的）。"""
     tag = {3: "[图片]", 34: "[语音]", 43: "[视频]", 47: "[表情]", 49: "[卡片]"}
     out = []
@@ -486,7 +503,7 @@ def transcript(msgs, me_id, me, each=500, total=3000):
         lim = each * 4 if m.get("record") else each      # 转发的聊天记录放宽
         if len(body) > lim:
             body = body[:lim] + "…（太长，已截断）"
-        out.append(f"{who}: {body}")
+        out.append((f"#{m.get('id')} " if ids else "") + f"{who}: {body}")
     text = "\n".join(out)
     return text if len(text) <= total else "…（更早的省略）\n" + text[-total:].split("\n", 1)[-1]
 
@@ -503,7 +520,10 @@ def cli_article(url):
     d = api("/article?url=" + quote(url))
     print(d.get("title", ""), "|", d.get("account_name", ""), "\n", d.get("text") or d.get("error") or "（没取到正文）")
 
-USAGE = ("用法：python3 awx.py search <关键词，空格分开=都要有> [聊天的微信号]\n"
+USAGE = ("用法：python3 awx.py search <关键词，空格分开=都要有> [聊天的微信号]   每条前面是消息 id\n"
+         "      python3 awx.py chat <微信号或名字> [条数]  某个聊天最近的消息（默认 30 条，每条前面是消息 id）\n"
+         "      python3 awx.py forward <来源微信号或名字> <转到哪：微信号/备注/群名> <消息id…> [--one]\n"
+         "                           用微信自己的转发转出去；多条默认合并成聊天记录卡片，--one 逐条转；只在本人亲口让转时用\n"
          "      python3 awx.py articles [关键词…]   列收到的公众号文章（含链接）\n"
          "      python3 awx.py article <链接>        读文章正文\n"
          "      python3 awx.py speak <微信号> <内容>  发语音条（wxtest 转成语音（本人克隆声），结尾念设置 voice_sign）；只在本人亲口让发时用\n"
@@ -557,12 +577,24 @@ if __name__ == "__main__":     # 给 Muse 用的命令行：查更早的聊天�
         r = call("/speak", {"to": u, "text": " ".join(sys.argv[3:]), "allow_group": u.endswith("@chatroom"),
                             "voice": v, "tail": voices.tail(cfg, v)}, 300) or {}
         print("发出了" if r.get("ok") else f"没发成：{r.get('status') or r.get('error') or '没结果，去聊天里看一眼'}"); sys.exit()
+    if cmd in (["chat"], ["forward"]) and len(sys.argv) > 2 + (cmd == ["forward"]) * 2:
+        import db
+        c = db.conn(); db.init(c); cfg = db.config(c)
+        try: u = find_chat(sys.argv[2])
+        except LookupError as e: sys.exit(str(e))
+        if cmd == ["chat"]:
+            n = int(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3].isdigit() else 30
+            print(f"== {u}"); print(transcript(messages(u, min(n, 200)), cfg["me_id"], cfg["me"] or cfg["title"], total=20000, ids=True)); sys.exit()
+        nums = [a for a in sys.argv[4:] if a != "--one"]
+        if not nums or not all(re.fullmatch(r"-?\d+", a) for a in nums): sys.exit("消息 id 要写数字（awx.py chat 看到的 # 后面那个）")
+        ok, st = forward(u, [int(a) for a in nums], sys.argv[3], False if "--one" in sys.argv else None)
+        print(("转出去了：" if ok else "没转成：") + str(st)); sys.exit()
     if cmd != ["search"] or len(sys.argv) < 3:
         sys.exit(USAGE)
     import db
     c = db.conn(); db.init(c); cfg = db.config(c)
     r = search(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "")
     for h in r.get("results", []):
-        print(f"== {h['chat_name']}（{time.strftime('%Y-%m-%d %H:%M', time.localtime(h['time']))}）")
-        print(transcript(h["before"] + [h] + h["after"], cfg["me_id"], cfg["me"] or cfg["title"], total=1500))
+        print(f"== {h['chat_name']}（{h['chat']}，{time.strftime('%Y-%m-%d %H:%M', time.localtime(h['time']))}）")
+        print(transcript(h["before"] + [h] + h["after"], cfg["me_id"], cfg["me"] or cfg["title"], total=1500, ids=True))
     print(f"共 {r.get('count', 0)} 条" + ("，只列最新的" if r.get("count", 0) > len(r.get("results", [])) else ""))

@@ -383,14 +383,16 @@ def owner_task(cfg, t):
             "earlier": awx.transcript(earlier, me, cfg["me"] or cfg["title"], each=300, total=2000) if earlier else "",
             "act": f"python3 say.py {me}"}
 
-def _remember(c, chat, recent, cfg, voice=None, ask=()):
-    """回的是哪条、对方说了什么、要不要用语音回（用谁的声音），留给 act.py，它就不用再读一遍消息。"""
+def _remember(c, chat, recent, cfg, voice=None, ask=(), new=()):
+    """回的是哪条、对方说了什么、要不要用语音回（用谁的声音）、这次对方新发的是哪几条（要转发时转这些），留给 act.py，它就不用再读一遍消息。"""
     rid = next((m["id"] for m in reversed(recent) if m.get("sender_id") != cfg["me_id"]), None)
     said = next(((m.get("content") or "")[:60] if m.get("type") == 1 else "[非文字]"
                  for m in reversed(recent) if m["id"] == rid), "")
     qs = [[m["id"], (m.get("content") or "")[:200]] for m in recent[-30:]          # AI 想引用某句时，act.py 按原话在这里找 id
           if m.get("type") == 1 and not m.get("ai") and (m.get("content") or "").strip()]
-    db.meta_set(c, "task:" + chat, json.dumps({"rid": rid, "said": said, "voice": voice, "ask": list(ask), "qs": qs}, ensure_ascii=False))
+    fw = [[m["id"], ((m.get("content") if m.get("type") == 1 else m.get("voice_text")) or "")[:200]]   # 要转发时 AI 可从中挑几条（act.pick_ids）
+          for m in new if m.get("sender_id") != cfg["me_id"] and not m.get("ai") and m.get("type") not in (10000, 50)]
+    db.meta_set(c, "task:" + chat, json.dumps({"rid": rid, "said": said, "voice": voice, "ask": list(ask), "qs": qs, "fw": fw}, ensure_ascii=False))
 
 def _build(c, chat, name, cfg, recent, new, tags=(), remark=None, called=False):
     # 机器人对聊、刷屏、勿回、拍一拍、本人在聊、群里没叫到本人：wxtest 派任务前已经处理掉了
@@ -590,7 +592,7 @@ def run(c, cfg):
     if not task:
         awx.task_done(t["id"], {"result": {"action": "none"}, **notes()} if NOTES else {"skip": "不用回"})
         return
-    _remember(c, chat, recent, cfg, task.pop("voice", None), task.pop("_ask", ()))
+    _remember(c, chat, recent, cfg, task.pop("voice", None), task.pop("_ask", ()), new)
     task["act"] += f" --task {t['id']}"
     print(json.dumps({"tasks": [task]}, ensure_ascii=False))
 

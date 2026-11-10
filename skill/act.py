@@ -4,7 +4,7 @@
 JSON 可含 "profile"（画像，写库）和 "intent" + "reply"（回复）。
 技术问题要联网查时先写 {"intent": "tech", "wait": "稍等的话"}：这里先把稍等发出去、任务不交，查完再跑一次同样的命令交正式回复。发不发、发草稿还是只通知，按风险表由这里决定，不由 Muse 决定。
 定下来的结论交回 wxtest：要发的回复（send）和给本人的通知（notify）由 wxtest 去发，发不出它自己重试，这里不等。"""
-import json, os, sys, time
+import json, os, re, sys, time
 import awx, db, reply_rules as rr, sns, voices, watch
 
 
@@ -63,10 +63,18 @@ def main():
     if draft:
         if ok: db.add_draft(db.conn(), chat, *draft)
         else: print(f"[draft] {tid} 草稿不存", flush=True)
+    if ok and _fwd[0]:                 # 本人规则里要转的：结论交上了（这条归本机）才转，转发失败只记日志
+        fw = _fwd[0]
+        to, merge = (fw.get("to"), fw.get("merge")) if isinstance(fw, dict) else (fw, None)
+        ids = pick_ids(db.meta_json(db.conn(), "task:" + chat, {}).get("fw") or [], fw.get("pick") if isinstance(fw, dict) else None)
+        if isinstance(to, str) and to.strip() and ids:
+            print(f"[forward] -> {to}: {awx.forward(chat, ids, to.strip(), merge)}", flush=True)
     snd = out.get("send")
     if not ok and snd and out.get("waited") and not (r or {}).get("dropped"):   # 本人接管 / 对方又说话作废的不补发（别台因回过稍等跳过的照样补）   # 查资料超过 5 分钟、任务被收回：重派的会因已回过稍等而跳过，这里自己补发；稍等之后已有人回过，wxtest 发送锁里会挡掉（reply_to）
         ok, st, _ = awx.send(chat, snd["text"], db.config(db.conn())["me_id"], snd["group"], reply_to=snd["reply_to"])
         print(f"[send] 任务已收回，直接补发：{st}", flush=True)
+
+_fwd = [None]   # AI 写的 forward（转到哪），交上结论后 main 去转
 
 def run(chat, media, sns_ref=None):
     """返回交给 wxtest 的结论：{"result": {...}, "send": {...}, "notify": "...", "notify_if_sent": "..."}。"""
@@ -75,6 +83,7 @@ def run(chat, media, sns_ref=None):
         data = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
     except ValueError:
         data = {}
+    _fwd[0] = None if sns_ref else data.get("forward")
     c = db.conn(); db.init(c)
     cfg = db.config(c)
     row = c.execute("SELECT alias FROM profile WHERE chat=?", (chat,)).fetchone()
@@ -145,6 +154,20 @@ def quote_id(tk, words):
         if w in "".join(text.split()): return mid
     print(f"[quote] 没找到「{w[:20]}」这句，不引用，照常发", flush=True)
     return None
+
+def pick_ids(fw, pick=None):
+    """要转的消息 id。fw 是 tick.py 记下的这次对方新发的 [[id, 文字], ...]；pick 不给就全转，
+    给了只转挑中的：数字或「图片#123」这类带 # 的按 id，其余按原话里连续的几个字找。只在这批里挑，挑不中的丢掉并记日志。"""
+    fw = [f if isinstance(f, list) else [f, ""] for f in fw]
+    if pick is None: return [f[0] for f in fw]
+    got = set()
+    for p in pick if isinstance(pick, list) else [pick]:
+        m = re.search(r"#(-?\d+)\s*\]?$", str(p)) or re.fullmatch(r"\s*(-?\d+)\s*", str(p))
+        w = "".join(str(p).split())
+        hit = [f[0] for f in fw if (m and f[0] == int(m.group(1))) or (not m and w and w in "".join(f[1].split()))]
+        if not hit: print(f"[forward] 这批里没找到「{w[:20]}」，不转这条", flush=True)
+        got.update(hit)
+    return [f[0] for f in fw if f[0] in got]
 
 def with_ref(out, data):
     """Muse 用外部工具查到的参考（建议价、客户上次价、账款等）只给本人看：接在通知后面，绝不进发给对方的正文。"""

@@ -20,6 +20,7 @@
 | 看视频 | `GET /video/frames?chat=&id=`、`GET /video/ask?chat=&id=&q=` |
 | 语音转文字 | `POST /voice2text` |
 | 撤回（2 分钟内） | `POST /revoke` |
+| 转发（微信自己的转发，可合并成聊天记录卡片） | `POST /forward`（`{"chat","ids","to","merge"?}`） |
 | 领任务、交结论、心跳 | `GET /next_task`、`POST /task/<id>`、`POST /heartbeat` |
 | 慢操作结果 | `GET /job?id=<job>&wait=15` |
 
