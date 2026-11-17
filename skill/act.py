@@ -35,7 +35,7 @@ def main():
     chat, args = sys.argv[1], sys.argv[2:]
     tid = args[args.index("--task") + 1] if "--task" in args else None
     c = db.conn(); db.init(c)
-    waited = db.meta_json(c, "task:" + chat, {}).get("waited")
+    waited = tid and waited_for(db.meta_json(c, "task:" + chat, {}), tid)   # 只认这条任务自己回过的稍等（旧任务留下的 waited 不算）
     if tid and os.path.exists(watch.gone(tid)):   # 心跳已得知不归本机（本人接管、别台接手）
         print(f"[task] {tid} 已不是本机的：{open(watch.gone(tid), encoding='utf-8').read()}。不处理，直接结束，不要汇报", flush=True)
         watch.done(tid); return
@@ -44,15 +44,20 @@ def main():
         print(f"[task] {tid} 已不是本机的：{chk.get('why') or (str(chk['status']) + '，' + str(chk['agent']))}。不处理，直接结束，不要汇报", flush=True)
         watch.done(tid); return
     if tid: watch.begin(tid)           # 告诉值班：已在处理，别自动交还
-    out = run(chat, "--media" in args, args[args.index("--sns") + 1] if "--sns" in args else None)
+    out = run(chat, "--media" in args, args[args.index("--sns") + 1] if "--sns" in args else None, tid=tid)
     if out is None:                    # 只发了「稍等」，任务留在手里，查完再跑一次
         return
     draft = out.pop("draft", None)
     if "--task" not in args:           # 批量画像没有 --task：不交结论，草稿直接存
         if draft: db.add_draft(db.conn(), chat, *draft)
         return
-    r = awx.task_done(tid, out)
+    fw_check(chat, out)                # 转发目标本人规则里没写：不转，改成告诉本人
+    seen = db.meta(db.conn(), "redo:" + tid)   # 被拦过：读全了新消息才有，wxtest 见不到它就不发
+    r = awx.task_done(tid, dict(out, redo_ok=True, **({"seen_upto": int(seen)} if seen.isdigit() else {})))   # redo_ok：本机认「对方又说话了，改一下再交」
+    if r and r.get("error") == "redo":   # 想的时候对方又说话了：任务仍归本机，看完新消息改好再交（收件箱里留着）
+        return redo(chat, tid, r)
     watch.done(tid)                    # 交了（或被拒）就从值班收件箱删掉，watch.py 接着领下一条
+    if seen: db.meta_del(db.conn(), "redo:" + tid)
     ok = bool(r and r.get("ok"))
     if not ok:
         print(f"[task] {tid} 结论没交上：{(r or {}).get('why') or (r or {}).get('error', '连不上')}，现状 {(r or {}).get('status')}（{(r or {}).get('agent')}）", flush=True)
@@ -70,13 +75,94 @@ def main():
         if isinstance(to, str) and to.strip() and ids:
             print(f"[forward] -> {to}: {awx.forward(chat, ids, to.strip(), merge)}", flush=True)
     snd = out.get("send")
-    if not ok and snd and out.get("waited") and not (r or {}).get("dropped"):   # 本人接管 / 对方又说话作废的不补发（别台因回过稍等跳过的照样补）   # 查资料超过 5 分钟、任务被收回：重派的会因已回过稍等而跳过，这里自己补发；稍等之后已有人回过，wxtest 发送锁里会挡掉（reply_to）
-        ok, st, _ = awx.send(chat, snd["text"], db.config(db.conn())["me_id"], snd["group"], reply_to=snd["reply_to"])
-        print(f"[send] 任务已收回，直接补发：{st}", flush=True)
+    if not ok and snd and out.get("waited") and not (r or {}).get("dropped"):   # 本人接管 / 对方又说话作废的不补发   # 查资料超过 5 分钟、任务被收回：这里自己补发；稍等之后已有人回过，wxtest 发送锁里会挡掉（reply_to）
+        chk = awx.task_check(tid)      # 补发前再问一次：只有「过期作废、没有别台接手或交过」才补，别和别台各发一遍
+        if chk and chk.get("status") == "EXPIRED" and not chk.get("agent"):
+            ok, st, _ = awx.send(chat, snd["text"], db.config(db.conn())["me_id"], snd["group"], reply_to=snd["reply_to"])
+            print(f"[send] 任务已收回，直接补发：{st}", flush=True)
+        else:
+            print(f"[send] 任务已收回，现状 {(chk or {}).get('status') or '查不到'}（{(chk or {}).get('agent') or '-'}），不补发", flush=True)
+
+def redo(chat, tid, r):
+    """wxtest 拦下了这次回复：AI 想的时候对方又发了 from_id..upto 这几条（已并进这条任务，别台领不到）。
+    把「回的是哪条、对方说了什么、能引用/转发的」换成含新消息的，打印新消息和 AI 刚写的回复，等 AI 改好再跑一次同样的 act。只拦一次。"""
+    c = db.conn(); cfg = db.config(c)
+    lo, hi = int(r.get("from_id") or 0), int(r.get("upto") or 0)
+    try: new = read_range(chat, lo, hi)
+    except Exception as e:   # 没读到/没读全：回复不发（wxtest 见不到 seen_upto 也不收），过一会儿再跑同一条 act 重读
+        print(f"[redo] 读对方新消息失败（{str(e)[:80]}），回复没发。过半分钟再执行一次同样的 act 命令（--task 不变），"
+              "会先重读新消息；一直读不到 wxtest 会按超时收回这条", flush=True)
+        return
+    awx.voice_text(new)
+    theirs = [m for m in new if m.get("sender_id") != cfg["me_id"] and not m.get("ai")]
+    tk = db.meta_json(c, "task:" + chat, {})
+    if theirs:
+        last = theirs[-1]
+        tk.update(rid=last["id"], said=(last.get("content") or "")[:60] if last.get("type") == 1 else "[非文字]")
+    tk["qs"] = (tk.get("qs") or []) + [[m["id"], (m.get("content") or "")[:200]] for m in theirs
+                                       if m.get("type") == 1 and (m.get("content") or "").strip()]
+    tk["fw"] = (tk.get("fw") or []) + [[m["id"], ((m.get("content") if m.get("type") == 1 else m.get("voice_text")) or "")[:200]]
+                                       for m in theirs if m.get("type") not in (10000, 50)]
+    db.meta_set(c, "task:" + chat, json.dumps(tk, ensure_ascii=False))
+    info = {"redo": tid, "new": awx.transcript(new, cfg["me_id"], cfg["me"] or cfg["title"], each=500, total=2000) if new else "",
+            "draft": str(r.get("draft") or "")}
+    if theirs and cfg.get("vision"):
+        imgs = awx.attach_images(theirs, chat)
+        if imgs: info["images"] = imgs
+    if theirs:
+        files = awx.attach_files(theirs, chat)
+        if files: info["files"] = files
+    print(json.dumps(info, ensure_ascii=False), flush=True)
+    db.meta_set(c, "redo:" + tid, str(hi))   # 读全了：再交时带上 seen_upto
+    print("[redo] 你想回复的时候对方又发了上面 new 里的话，draft 是你刚写的回复，还没发。把新的话一起考虑，"
+          "按「写回复的规矩」重新写一个完整 JSON（不用改就原样再交），再执行一次同样的 act 命令（--task 不变）。"
+          "这条任务仍归本机，别台不会接；只拦这一次。", flush=True)
+
+REDO_PAGES = 10   # 按 ID 最多读 10 页（500 条）
+
+def read_range(chat, lo, hi):
+    """按 ID 读 lo..hi；服务端确认范围已遍历且首尾都在，才允许提交回复。"""
+    got, start = {}, lo
+    for _ in range(REDO_PAGES):
+        page = awx.messages_range(chat, start, hi)
+        batch = page.get("messages", [])
+        if any(not start <= m["id"] <= hi for m in batch): break
+        got.update((m["id"], m) for m in batch)
+        if page.get("complete") is True:
+            if lo in got and hi in got: return [got[k] for k in sorted(got)]
+            break
+        if page.get("complete") is not False or not batch: break
+        start = max(m["id"] for m in batch) + 1
+    raise RuntimeError(f"#{lo}..#{hi} 没读全")
+
+def waited_for(tk, tid):
+    """task:<chat> 里的 waited 只在是同一条任务（tid 对得上）时才算；批量画像（没 --task）照旧认。"""
+    return bool(tk.get("waited")) and (tid is None or tk.get("tid") == tid)
 
 _fwd = [None]   # AI 写的 forward（转到哪），交上结论后 main 去转
 
-def run(chat, media, sns_ref=None):
+def fw_target(fw):
+    to = fw.get("to") if isinstance(fw, dict) else fw
+    return to.strip() if isinstance(to, str) else ""
+
+def fw_check(chat, out):
+    """AI 要转的目标必须原样出现在本人给这个人定的规则里（tick.py 记在 task meta 的 rules，含通用和标签规则；群也一样）。
+    规则里没写（或目标不到 2 个字）就不转：清掉 _fwd，在给本人的通知里说一声 AI 想转去哪。"""
+    if not _fwd[0]:
+        return
+    to = fw_target(_fwd[0])
+    rules = str(db.meta_json(db.conn(), "task:" + chat, {}).get("rules") or "")
+    if len(to) >= 2 and to in rules:
+        return
+    _fwd[0] = None
+    print(f"[forward] 规则里没写「{to[:30]}」，不转，告诉本人", flush=True)
+    if not db.config(db.conn())["notify_to"] or not to:
+        return
+    row = db.conn().execute("SELECT alias FROM profile WHERE chat=?", (chat,)).fetchone()
+    msg = f"AI 想把{(row and row['alias']) or chat}这次的消息转给「{to[:30]}」，你给 TA 定的规则里没写这个目标，没转；要转请自己转，或在规则里写明。"
+    out["notify"] = (out["notify"] + "\n" + msg) if out.get("notify") else msg
+
+def run(chat, media, sns_ref=None, tid=None):
     """返回交给 wxtest 的结论：{"result": {...}, "send": {...}, "notify": "...", "notify_if_sent": "..."}。"""
     raw = sys.stdin.read()
     try:
@@ -90,9 +176,11 @@ def run(chat, media, sns_ref=None):
     name = (row and row["alias"]) or chat
     if isinstance(data.get("profile"), dict):
         p = data["profile"]
-        if "risk" in p and p["risk"] not in ("low", "mid", "high"):
+        if "risk" in p and p["risk"] not in db.RISKS:
             p["risk"] = "high"
-        db.save_profile(c, chat, name, p)
+        if p.get("relation") and str(p["relation"]).strip() not in db.RELATIONS:   # 选项外的关系一律记「其他」
+            p["relation"] = "其他"
+        db.save_profile(c, chat, name, p, db.AI_FIELDS)   # AI 只能写画像字段，mode/reply_when 这些本人设置不归它改
         print(f"[profile] {name}: {p.get('relation')} {p.get('risk')}", flush=True)
     lp = data.get("profile") if isinstance(data.get("profile"), dict) and (data["profile"].get("label") or data["profile"].get("top")) else data
     lbs = ai_labels(lp, cfg)
@@ -109,17 +197,19 @@ def run(chat, media, sns_ref=None):
         return sns.decide(c, chat, tid, int(cid), data, cfg)
     prof = db.profile(c, chat)
     tk = db.meta_json(c, "task:" + chat, {})       # tick.py 记下的：回的是哪条、对方说了什么
+    if tk.get("waited") and not waited_for(tk, tid): tk.pop("waited")   # 别的任务留下的稍等：这条不算回过稍等
     rid, said = tk.get("rid"), tk.get("said", "")
-    if data.get("wait") and data.get("intent") == "tech" and not media:
+    off = prof.get("mode") == "off"               # 本人设了不回：本地兜底（wxtest 的过滤名单可能还没推上）
+    if data.get("wait") and data.get("intent") == "tech" and not media and not off:
         if rr.decide(prof, "tech", "x", cfg)[0] != "auto":   # 只存草稿的人不发稍等
             print(f"[wait] {name}: 这个人只存草稿，不发稍等；查完直接再跑一次 act 交正式回复", flush=True)
             return None
-        return wait(c, chat, name, prof, cfg, tk, str(data["wait"]).strip())
-    if media and prof["risk"] != "low":
+        return wait(c, chat, name, prof, cfg, tk, str(data["wait"]).strip(), tid)
+    if off or (media and prof["risk"] != "low"):
         act, text = "skip", ""
     else:
         act, text = rr.decide(prof, data.get("intent"), (data.get("reply") or "").strip(), cfg)
-    if tk.get("waited") and act == "skip":          # 已经让对方稍等了，查不出来也得让本人知道
+    if tk.get("waited") and act == "skip" and not off:   # 已经让对方稍等了，查不出来也得让本人知道
         act = "notify"
     out = {"result": {"action": act, "intent": data.get("intent")}, "waited": bool(tk.get("waited"))}
     note = lambda x: x if cfg["notify_to"] else None     # wxtest 发给本人时自己加【助理通知】
@@ -177,7 +267,7 @@ def with_ref(out, data):
         if out.get(k): out[k] += f"\n参考：{ref}"
     return out
 
-def wait(c, chat, name, prof, cfg, tk, text):
+def wait(c, chat, name, prof, cfg, tk, text, tid=None):
     """技术问题要联网查：先回一句稍等，再把「回的是哪条」挪到这句稍等上，正式回复才不会被当成已经回过而跳过。"""
     ok, st, _ = awx.send(chat, text, cfg["me_id"], prof["is_group"], reply_to=tk.get("rid"))
     if not ok:                                     # 稍等没发出去（对方/本人刚接话等），按原来的直接答
@@ -185,7 +275,7 @@ def wait(c, chat, name, prof, cfg, tk, text):
         return None
     mine = [m["id"] for m in awx.messages(chat, 5) if m.get("ai")]   # 刚发出的那句稍等
     if mine:
-        db.meta_set(c, "task:" + chat, json.dumps(dict(tk, rid=mine[-1], waited=1), ensure_ascii=False))
+        db.meta_set(c, "task:" + chat, json.dumps(dict(tk, rid=mine[-1], waited=1, **({"tid": tid} if tid else {})), ensure_ascii=False))
     if cfg["notify_to"]:                           # 本人也知道一声：在帮谁查什么（只提交不等，不耽误查资料）
         awx.send(cfg["notify_to"], f"【助理通知】{name} 问技术：「{tk.get('said', '')}」，AI 已回稍等，正在联网查资料，查完自动回复。",
                  cfg["me_id"], wait=0)

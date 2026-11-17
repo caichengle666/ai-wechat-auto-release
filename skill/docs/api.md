@@ -27,13 +27,14 @@
 能用现成脚本就别直接调接口（`tick.py` 领任务、`act.py` 交结论、`hb.py` 心跳、`say.py` 代发、`sns.py` 朋友圈、`radar.py` 群商机，`awx.py` 已封装好下面这些坑）。自己调时记住：
 - 慢操作（`/send`、`/voice2text`、`/moments*` 的 POST）跨机器一律在 body 带 `job`，再 `GET /job?id=&wait=15` 轮询；同一个 `job` 重复提交不会重做；查到 `unknown`（wxtest 重载过）或 `UNCONFIRMED` 就先查消息/动态确认发没发出，别直接重发。
 - 发文件：文件在 agent 机器上，用 `file_b64` + `filename` 传；`file` 只认微信机器上 `WX_FILE_DIR` 里的文件。
+- 发音频：mp3 等 3 分钟以内的音频，`/send` 默认录成微信语音条（对方点开就听）；带歌手/专辑标签的 mp3 和超 3 分钟的自动按文件发；其他歌、录音资料要对方保存的加 `"as_file": true` 按文件发。
 - 不要自己给回复加备注，wxtest 强制加。
 
 ## 微信掉线了怎么自己修
 本人只需要在手机上点一下确认或扫码，其余都由你做。按顺序：
 1. `GET /status` 看 `logged_in`；没登录时看 `login_stage`：
    - `confirm`：已自动点了「登录」，在等手机确认 → 告诉本人「手机微信上点一下确认登录」。
-   - `scan`：要扫码 → 把扫码页 `<AWX_BASE>/qr?token=<AWX_TOKEN>` 发给本人（页面每 5 秒刷新，二维码过期自动换新）。
+   - `scan`：要扫码 → `GET /qr_link` 拿 `url`，把 `<AWX_BASE><url>` 发给本人（不含令牌、6 小时内有效，页面每 5 秒刷新，二维码过期自动换新）。**不要**把带 `?token=` 的链接发出去：令牌等于整个微信的控制权。
    - `starting`：微信刚重启，等 30 秒再看。
    - `stuck`：卡住了（没二维码也没在等确认）→ wxtest 会自己重启微信进程（最多 10 分钟一次）；急的话可以 `POST /relogin`，30 秒后再看 `/status`。
 2. 拿不准屏幕上是什么：`GET /screen` 取截图看一眼；本人想自己看，让本人去控制面板（`<地址>/panel`）打开远程桌面（要验证码，令牌进不去）。
@@ -47,5 +48,5 @@
 接口：
 - `GET /status` → `logged_in`、`login_stage`（scan / confirm / starting / stuck）、`agents`（在线 agent 名单）
 - `POST /relogin` → 掉线自修：重启微信进程回到登录页，自动点「登录」等手机确认，超时出新二维码
-- `GET /qr?token=` → 扫码页；`GET /screen` → 屏幕截图 PNG
+- `GET /qr_link` → `{url, exp, ttl}` 扫码页短期签名链接（`?ttl=` 秒，默认和最长都是 21600）；`GET /qr` → 扫码页；`GET /screen` → 屏幕截图 PNG
 - `POST /reload` → 只重载接口进程（用上新代码），微信不动

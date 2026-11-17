@@ -220,6 +220,10 @@ def messages(chat, limit=30, before=0):
     """最近 limit 条；before 给消息 id 就取它之前的（往前翻；迁移来的老记录 id 是负数）。"""
     return api(f"/messages?chat={urllib.parse.quote(chat)}&limit={limit}&before={before}").get("messages", [])
 
+def messages_range(chat, lo, hi, limit=50):
+    """按当前库消息 ID 范围读取；complete 由服务端确认，旧服务端不能冒充读全。"""
+    return api(f"/messages?chat={urllib.parse.quote(chat)}&from_id={lo}&upto={hi}&limit={limit}")
+
 def find_chat(name):
     """微信号原样返回；名字在会话列表（备注/昵称/群名）里找：完全一样的优先，否则包含这几个字的，唯一才算，多个或没有抛 LookupError 列出来。"""
     if name.startswith(("wxid_", "gh_")) or name.endswith("@chatroom") or name == "filehelper": return name
@@ -492,6 +496,9 @@ def transcript(msgs, me_id, me, each=500, total=3000, ids=False):
             body = f"[视频#{m.get('id')}]"
         elif t == 49 and m.get("finder"):
             body = f"[视频号#{m.get('id')}：{m['finder'].get('title') or ''}]"
+        elif t == 49 and m.get("app") == 5 and m.get("url"):    # 链接：带 id，读正文跑 awx.py article <微信号> <id>
+            mp = urllib.parse.urlparse(m["url"]).hostname == "mp.weixin.qq.com"
+            body = f"[{'公众号文章' if mp else '链接'}#{m.get('id')}：{m.get('content') or ''}]" + ("" if mp else f"（{m['url'][:200]}）")
         elif t == 49 and m.get("app") == 6:
             body = f"[文件#{m.get('id')}：{m.get('content') or ''}]"
         elif t == 49 and m.get("app_name"):              # 卡片：链接/文件/小程序/转账…带标题
@@ -515,9 +522,16 @@ def cli_articles(words):
         if all(w in s for w in words):
             print(f"{time.strftime('%m-%d %H:%M', time.localtime(a['time']))}  {a.get('account_name')}  {a['title']}\n  {a['url']}")
 
-def cli_article(url):
-    """公众号文章正文（纯文本；正文里的图片表格看不到）。"""
+def cli_article(args):
+    """公众号文章正文（纯文本；正文里的图片表格看不到）。给链接，或给「微信号 消息id」读聊天里转来的文章。"""
+    url = args[0]
+    if len(args) > 1:
+        msgs = api(f"/messages?chat={quote(args[0])}&limit=200").get("messages", [])
+        url = next((m.get("url") for m in msgs if str(m.get("id")) == args[1].lstrip("#")), "")
+        if not url: sys.exit(f"这个聊天最近 200 条里没找到消息 {args[1]} 的链接")
     d = api("/article?url=" + quote(url))
+    if d.get("retry"):   # 「环境异常」验证页：等 20 秒再抓一次
+        time.sleep(20); d = api("/article?url=" + quote(url))
     print(d.get("title", ""), "|", d.get("account_name", ""), "\n", d.get("text") or d.get("error") or "（没取到正文）")
 
 USAGE = ("用法：python3 awx.py search <关键词，空格分开=都要有> [聊天的微信号]   每条前面是消息 id\n"
@@ -526,7 +540,10 @@ USAGE = ("用法：python3 awx.py search <关键词，空格分开=都要有> [�
          "                           用微信自己的转发转出去；多条默认合并成聊天记录卡片，--one 逐条转；只在本人亲口让转时用\n"
          "      python3 awx.py articles [关键词…]   列收到的公众号文章（含链接）\n"
          "      python3 awx.py article <链接>        读文章正文\n"
+         "      python3 awx.py article <微信号> <消息id>  读聊天里转来的文章（[公众号文章#id]）\n"
          "      python3 awx.py speak <微信号> <内容>  发语音条（wxtest 转成语音（本人克隆声），结尾念设置 voice_sign）；只在本人亲口让发时用\n"
+         "      python3 awx.py speak <微信号> --file <音频文件> [说的内容]  自己做好的音频录成语音条（超 52 秒 wxtest 切成几条，最长 3 分钟）；\n"
+         "                           替本人说话的用这个；歌、录音资料这类让对方保存的按文件发\n"
          "      python3 awx.py video <微信号> <消息id> [问题]  看懂视频（含视频号分享），几十秒到几分钟\n"
          "      python3 awx.py voices  已有哪些声音（克隆：文件传输助手发录音+「克隆声音 本人/新名字」，wxtest 自己做）")
 
@@ -562,12 +579,20 @@ if __name__ == "__main__":     # 给 Muse 用的命令行：查更早的聊天�
     if cmd == ["articles"]:
         cli_articles(sys.argv[2:]); sys.exit()
     if cmd == ["article"] and len(sys.argv) > 2:
-        cli_article(sys.argv[2]); sys.exit()
+        cli_article(sys.argv[2:4]); sys.exit()
     if cmd == ["video"] and len(sys.argv) > 3:   # wxtest 取视频交给 NotebookLM，处理中（202）就接着等
         video_answer(f"/video/ask?chat={quote(sys.argv[2])}&id={sys.argv[3]}&q={quote(' '.join(sys.argv[4:]))}&wait=55",
                      sys.argv[3], lambda: _video_busy(sys.argv[2])); sys.exit()
     if cmd == ["voices"]:
         print(api("/voices")); sys.exit()
+    if cmd == ["speak"] and len(sys.argv) > 4 and sys.argv[3] == "--file":
+        import base64
+        u, f = sys.argv[2], sys.argv[4]
+        try: raw = open(f, "rb").read()
+        except OSError as e: sys.exit(f"读不了音频文件：{e}")
+        r = call("/speak", {"to": u, "file_b64": base64.b64encode(raw).decode(), "filename": os.path.basename(f),
+                            "text": " ".join(sys.argv[5:]), "allow_group": u.endswith("@chatroom")}, 400) or {}
+        print("发出了" if r.get("ok") else f"没发成：{r.get('status') or r.get('error') or '没结果，去聊天里看一眼'}"); sys.exit()
     if cmd == ["speak"] and len(sys.argv) > 3:
         import db, voices
         u, cfg = sys.argv[2], db.config(db.conn())

@@ -102,8 +102,10 @@ def decide(prof, intent, reply, cfg):
         return "notify", ""
     risk = prof.get("risk") if prof.get("risk") in TABLE else "high"
     act = cfg.get("policy", {}).get((risk, intent)) or TABLE[risk][intent]   # 本人在 policy 里改过的格子优先
-    if act == "hold":
-        return ("auto" if cfg["rollout"] == "auto" else "draft"), cfg["hold"]
+    if act == "hold":                     # 套话也算发出去的话：只存草稿的人（草稿<名>）和全局试运行一样只存草稿
+        if prof.get("mode") == "draft" or cfg["rollout"] != "auto":
+            return "draft", cfg["hold"]
+        return "auto", cfg["hold"]
     if act == "notify":
         return "notify", ""
     if not reply:

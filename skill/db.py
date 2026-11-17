@@ -6,6 +6,10 @@ import sys, json, os, sqlite3, time
 PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.environ.get("AWX_DB", "store.db"))   # 相对路径按本目录算，不随调用者的当前目录变（否则会在别处建空库）
 FIELDS = ("relation", "risk", "mode", "tone", "style", "address",
           "topics", "sensitive", "lang", "reply_when")
+# AI 自动画像（act.py 交来的 profile）只能写这些；mode / reply_when / lang 是本人的设置，只能由文件传输助手命令（set_rule）、控制面板改
+AI_FIELDS = ("relation", "risk", "tone", "style", "address", "topics", "sensitive")
+RISKS = ("low", "mid", "high")
+RELATIONS = ("家人", "朋友", "同行", "客户", "供应商", "员工", "陌生人", "其他")   # SKILL.md 画像里 relation 的选项
 RULES = os.environ.get("AWX_RULES") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "rules")
 RULES_MAX = 2000
 # settings.json 里能填的项（seed.py 写进 meta）；新增设置要同时加进这里、settings.example.json、docs/settings.md、config()
@@ -106,7 +110,7 @@ def config(c):
         "rollout": g("rollout", "auto"),
         # 用户可调的时长/数量（含义和场景见 docs/settings.md），没填或填错用默认
         "draft_wait": num("draft_wait", 3), "handoff_min": num("handoff_min", 5),
-        "merge_sec": num("merge_sec", 8), "per_hour": num("per_hour", 40), "report_hour": num("report_hour", 21),
+        "merge_sec": num("merge_sec", 5), "per_hour": num("per_hour", 40), "report_hour": num("report_hour", 21),
         "bot_mute_min": num("bot_mute_min", 60), "pending_max_min": num("pending_max_min", 5),
         "vision": g("vision", "off").lower() in ("on", "1", "true", "yes"),   # Muse 的模型能看图才开
         "recall": g("recall", "on").lower() not in ("off", "0", "false", "no"),        # 别人撤回时把原文告诉本人（默认开）
@@ -148,6 +152,10 @@ def meta_set(c, k, v):
     c.execute("INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))
     c.commit()
 
+def meta_del(c, k):
+    c.execute("DELETE FROM meta WHERE k=?", (k,))
+    c.commit()
+
 def profile(c, chat):
     """合并 *default* 与该 chat 的行，空字段用默认兜底。"""
     d = c.execute("SELECT * FROM profile WHERE chat='*default*'").fetchone()
@@ -162,14 +170,14 @@ def profile(c, chat):
         prof["reply_when"] = prof["reply_when"] or "mention"
     return prof
 
-def save_profile(c, chat, alias, data):
-    """自动画像写库：locked 里的字段不覆盖。"""
+def save_profile(c, chat, alias, data, fields=AI_FIELDS):
+    """自动画像写库：只写 fields（默认 AI_FIELDS，AI 改不了 mode/reply_when/lang），locked 里的字段不覆盖。"""
     row = c.execute("SELECT locked FROM profile WHERE chat=?", (chat,)).fetchone()
     locked = {x.strip() for x in ((row and row["locked"]) or "").split(",") if x.strip()}
     now = int(time.time())
     c.execute("INSERT OR IGNORE INTO profile(chat,alias,is_group,updated) VALUES(?,?,?,?)",
               (chat, alias, int(is_group(chat)), now))
-    vals = {k: str(v)[:300] for k, v in data.items() if k in FIELDS and k not in locked and v not in (None, "")}
+    vals = {k: str(v)[:300] for k, v in data.items() if k in fields and k not in locked and v not in (None, "")}
     sets = "".join(f",{k}=?" for k in vals)
     c.execute(f"UPDATE profile SET profiled_at=?,updated=?{sets} WHERE chat=?", (now, now, *vals.values(), chat))
     c.commit()

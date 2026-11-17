@@ -66,6 +66,24 @@ def _left(c, pushed):
     """alert 设置里 wxtest 还没推过的渠道（它推过的 serverchan/bark/webhook 不重复推）。"""
     return ",".join(x for x in alert.channels(db.meta(c, "alert")) if x.partition(":")[0] not in pushed)
 
+QR_TTL = 6 * 3600   # 扫码页链接有效期：页面每 5 秒刷新换新码，过了很久才看到提醒也能直接扫
+
+def _qr_url():
+    """掉线提醒里给本人的扫码链接 + 引导语。向 wxtest 要一条签名链接（只能看扫码页，6 小时过期；页面自己刷新换新码），
+    提醒会经过 Server酱/Bark/邮件/webhook 和 Muse 日志，绝不能带主令牌。
+    wxtest 太旧（没 /qr_link）、连不上、回包不对：给控制面板地址（要本人账号密码才进得去），也不退回带令牌的链接。"""
+    try:
+        r = awx.api(f"/qr_link?ttl={QR_TTL}", timeout=15, tries=2)
+        u = r.get("url") if isinstance(r, dict) else None
+        if isinstance(u, str) and u.startswith("/qr?") and "sig=" in u and "token" not in u:
+            secs = int(r.get("ttl") or QR_TTL)
+            left = f"{secs // 3600} 小时" if secs >= 3600 and secs % 3600 == 0 else f"{max(1, secs // 60)} 分钟"
+            return awx.BASE + u, f"打开链接扫码（链接 {left}内有效，页面会自动换新二维码）："
+        print(f"[task] /qr_link 回包不对，改给控制面板地址：{str(r)[:120]}", file=sys.stderr)
+    except Exception as e:
+        print(f"[task] 要扫码短链接失败，改给控制面板地址：{type(e).__name__}: {str(e)[:120]}", file=sys.stderr)
+    return awx.BASE + "/panel", "打开控制面板，登录后用远程桌面扫码："
+
 def login_task(c, cfg, t):
     """wxtest 派来的掉线（alert）/恢复（up）任务。info.pushed = wxtest 已推过的渠道（phone 是控制面板绑的手机推送）。"""
     i = t.get("info") or {}
@@ -75,10 +93,11 @@ def login_task(c, cfg, t):
         awx.task_done(t["id"], {"result": {"action": "alert"}})
         return _muse_alert(i["text"]) if muse else None
     if t["kind"] == "alert":
-        qr, down = f"{awx.BASE}/qr?token={awx.TOKEN}", "微信掉线了，需要扫码或在手机上确认登录"
+        down = "微信掉线了，需要扫码或在手机上确认登录"
         text = f"{down}，已有约 {i.get('mins', 1)} 分钟，期间 AI 不回任何消息。"
         left = _left(c, pushed)
-        muse = bool(left) and alert.send(left, "微信掉线了", text + "打开链接扫码：", qr)[0]
+        qr, how = _qr_url() if left else ("", "")
+        muse = bool(left) and alert.send(left, "微信掉线了", text + how, qr)[0]
         awx.task_done(t["id"], {"result": {"action": "alert"}})
         return _muse_alert(text, qr) if muse else None
     msg = f"微信已恢复（断了约 {i.get('mins', 1)} 分钟），AI 已接回。"
@@ -92,19 +111,25 @@ def login_task(c, cfg, t):
     awx.task_done(t["id"], {"result": {"action": "notify"}, **notes()})
     return None
 
+NAME_MIN = 2              # 命令里的名字至少 2 个字（1 个字子串太容易误中别人或群）
+
 def _resolve(cfg, token):
-    """把命令里的名字/备注对到一个会话 username；对不上或多个都返回提示。"""
+    """把命令里的名字/备注对到一个会话 username：先找名字或 username 完全相同的，没有再按名字里的几个字找；
+    对不上、太短或对上多个都不动，返回提示让本人说全。"""
     token = token.strip()
     if not token:
         return None, "没说是谁"
+    if len(token) < NAME_MIN:
+        return None, f"「{token}」太短了，名字至少 {NAME_MIN} 个字，说全一点"
     try:
         ss = awx.api("/sessions").get("sessions", [])
     except Exception as e:
         return None, f"读会话失败（{e}）"
     me = cfg["me_id"]
-    hit = [s for s in ss if s["username"] != me and token in (s.get("name") or "")]
-    if not hit:                                   # 名字对不上就按 username 直接给
-        hit = [s for s in ss if s["username"] == token]
+    ss = [s for s in ss if s["username"] != me]
+    hit = [s for s in ss if token in (s["username"], s.get("name") or "")]   # 完全相同的优先
+    if not hit:
+        hit = [s for s in ss if token in (s.get("name") or "")]
     if not hit:
         return None, f"没找到「{token}」"
     if len(hit) > 1:
@@ -163,6 +188,10 @@ def _menu(c, cfg, t):
         db.meta_set(c, "menu", json.dumps({"t": int(time.time())}))
         return "接管 " + t
     if fresh and st.get("pre") and not t.isdigit() and not any(t.upper().startswith(k) for k in known):   # 等名字
+        if st["pre"] != "接管 " and not _resolve(cfg, t)[0]:   # 对不上唯一一个会话（多半是随手记的备忘）：什么都不改，退出菜单
+            db.meta_set(c, "menu", "{}")
+            say(cfg, f"「{t[:20]}」没对上唯一一个人或群，什么都没改，已退出菜单；要改请重新发「菜单」")
+            return None
         db.meta_set(c, "menu", json.dumps({"t": int(time.time())}))   # 菜单还有效，可接着回下一个数字
         return st["pre"] + t
     if fresh and t.isdigit() and 1 <= int(t) <= len(_MENU):
@@ -383,8 +412,9 @@ def owner_task(cfg, t):
             "earlier": awx.transcript(earlier, me, cfg["me"] or cfg["title"], each=300, total=2000) if earlier else "",
             "act": f"python3 say.py {me}"}
 
-def _remember(c, chat, recent, cfg, voice=None, ask=(), new=()):
-    """回的是哪条、对方说了什么、要不要用语音回（用谁的声音）、这次对方新发的是哪几条（要转发时转这些），留给 act.py，它就不用再读一遍消息。"""
+def _remember(c, chat, recent, cfg, voice=None, ask=(), new=(), rules="", tid=None):
+    """回的是哪条、对方说了什么、要不要用语音回（用谁的声音）、这次对方新发的是哪几条（要转发时转这些），留给 act.py，它就不用再读一遍消息。
+    tid：这是哪条任务，act.py 只认 tid 对得上的 waited（整份重写，上一条任务的 waited 顺带清掉）。"""
     rid = next((m["id"] for m in reversed(recent) if m.get("sender_id") != cfg["me_id"]), None)
     said = next(((m.get("content") or "")[:60] if m.get("type") == 1 else "[非文字]"
                  for m in reversed(recent) if m["id"] == rid), "")
@@ -392,11 +422,24 @@ def _remember(c, chat, recent, cfg, voice=None, ask=(), new=()):
           if m.get("type") == 1 and not m.get("ai") and (m.get("content") or "").strip()]
     fw = [[m["id"], ((m.get("content") if m.get("type") == 1 else m.get("voice_text")) or "")[:200]]   # 要转发时 AI 可从中挑几条（act.pick_ids）
           for m in new if m.get("sender_id") != cfg["me_id"] and not m.get("ai") and m.get("type") not in (10000, 50)]
-    db.meta_set(c, "task:" + chat, json.dumps({"rid": rid, "said": said, "voice": voice, "ask": list(ask), "qs": qs, "fw": fw}, ensure_ascii=False))
+    db.meta_set(c, "task:" + chat, json.dumps({"rid": rid, "said": said, "voice": voice, "ask": list(ask), "qs": qs, "fw": fw,
+                                              "rules": rules, "tid": tid}, ensure_ascii=False))
+
+def _unwait(c, chat):
+    """这个聊天的新任务不回（skip）：清掉上一条任务留下的 waited，免得旧任务号重跑 act 时被当成回过稍等。"""
+    tk = db.meta_json(c, "task:" + chat, {})
+    if tk.pop("waited", None) is not None: db.meta_set(c, "task:" + chat, json.dumps(tk, ensure_ascii=False))   # rules：act.py 只转规则里写明的目标
 
 def _build(c, chat, name, cfg, recent, new, tags=(), remark=None, called=False):
     # 机器人对聊、刷屏、勿回、拍一拍、本人在聊、群里没叫到本人：wxtest 派任务前已经处理掉了
     prof = db.profile(c, chat)
+    # 本地兜底：过滤名单推给 wxtest 没成功或还没补推时，本人说过不回的照样不回
+    if not prof["is_group"] and prof.get("mode") == "off":
+        print(f"[skip] {name}: 本人设了不回", file=sys.stderr); return None
+    if prof["is_group"] and (prof.get("reply_when") == "never" or prof.get("mode") == "off"):
+        print(f"[skip] {name}: 本人设了群不回", file=sys.stderr); return None
+    if prof["is_group"] and (prof.get("reply_when") or "mention") == "mention" and not called:
+        print(f"[skip] {name}: 群里没叫到本人", file=sys.stderr); return None
     awx.voice_text(recent)                                   # 语音 wxtest 派任务前已转好文字
     ok, why = rr.should_reply(prof, new, cfg, called)
     need = not prof["is_group"] and persona.stale(prof)      # 群不画像，省 token
@@ -488,7 +531,8 @@ def push_filter(c, cfg):
         return
     try:
         r = awx.api("/filter", dict(f, version=int(time.time() * 1000)), timeout=15)
-        if not r.get("ok"): print(f"[filter] wxtest 没收：{r.get('error')}（画像还没同步到最新，同步后会重推）", file=sys.stderr)
+        if not r.get("ok"):                    # 没收就不记「推过」，下一轮接着推
+            print(f"[filter] wxtest 没收：{r.get('error')}（画像还没同步到最新，同步后会重推）", file=sys.stderr); return
         db.meta_set(c, "filter", h); db.meta_set(c, "filter_at", str(int(time.time())))
     except Exception as e:
         print(f"[filter] {e}", file=sys.stderr)
@@ -590,9 +634,11 @@ def run(c, cfg):
     if new and not db.skip_chat(chat) and not db.meta(c, "paused"):
         task = _build(c, chat, name, cfg, recent, new, t.get("labels") or [], t.get("remark"), bool(t.get("called")))
     if not task:
+        _unwait(c, chat)
         awx.task_done(t["id"], {"result": {"action": "none"}, **notes()} if NOTES else {"skip": "不用回"})
         return
-    _remember(c, chat, recent, cfg, task.pop("voice", None), task.pop("_ask", ()), new)
+    _remember(c, chat, recent, cfg, task.pop("voice", None), task.pop("_ask", ()), new, (task.get("person") or {}).get("rules") or "",
+              tid=t["id"])
     task["act"] += f" --task {t['id']}"
     print(json.dumps({"tasks": [task]}, ensure_ascii=False))
 
