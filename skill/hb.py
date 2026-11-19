@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""心跳：tick.py 自动在后台拉起，每 20 秒告诉 wxtest「我还活着」，续上本 agent 手里所有任务，顺带报收件箱里的任务号，wxtest 回已不归本机的就当场叫停（只防「掉线」：单条领走 5 分钟没交，wxtest 照样收回）。
+"""心跳：tick.py 自动在后台拉起，每 20 秒告诉 wxtest「我还活着」，续上本 agent 手里所有任务，顺带报收件箱里的任务号，wxtest 回已不归本机的就当场叫停（只防「掉线」：单条领走 5 分钟没交，wxtest 照样收回；回了稍等报了 wait_min 的最多 8 分钟）。
 tick.py/watch.py 超过 2 分钟没动静（Muse 停了）或 skill 代码换了就自己退出，wxtest 60 秒收不到心跳就把任务收回给别的 agent。"""
 import os, sys, time
 import awx, db, watch

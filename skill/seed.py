@@ -31,8 +31,6 @@ def load_settings():
         raise SystemExit("settings.json 里 me（名字）和 title（别人怎么称呼你）必须由用户填写")
     if not st.get("agent"):
         raise SystemExit("settings.json 里 agent（这台 agent 的名字，几台各不相同）必须由用户起，wxtest 不替你取")
-    if st.get("rollout", "auto") not in ("auto", "draft"):
-        raise SystemExit("rollout 只能是 auto 或 draft")
     if st.get("sns", "notify") not in ("notify", "reply", "off"):
         raise SystemExit("sns 只能是 notify、reply 或 off")
     if st.get("friend", "notify") not in ("accept", "notify", "off"):
@@ -67,10 +65,8 @@ def main():
     c.commit()
     cfg = db.config(c)
     print(f"本人 {cfg['me']}（{cfg['me_id']}），称呼 {cfg['title']}，备注 {cfg['sign']}，"
-          f"模式 {cfg['rollout']}，通知发给 {cfg['notify_to'] or '（只打日志）'}，"
+          f"通知发给 {cfg['notify_to'] or '（只打日志）'}，"
           f"掉线告警走 {db.meta(c, 'alert') or 'muse'}；导入 {n} 个会话。")
-    if cfg["policy"]:
-        print("风险表改过的格子：" + "，".join(f"{r}.{i}={a}" for (r, i), a in cfg["policy"].items()))
     print(f"红线：{cfg['redlines']}" if cfg["redlines"] else
           "红线还没填：AI 回复时没有红线。按 docs/settings.md 问用户，用户不写就按通用模板写一份给 TA 确认，再跑一次 seed.py。")
 

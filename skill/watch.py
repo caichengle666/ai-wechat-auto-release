@@ -23,6 +23,7 @@ INBOX = os.path.join(HERE, "inbox")
 GIVEBACK = 180      # 叫醒后这么久处理员还没跑 act（没起来、被平台拦下、只汇报没交）：交还给 wxtest 让别台马上接，不干等 5 分钟收回
                     # （hook 同一条只叫醒一次：重复叫醒会把平台唤醒放大、处理员排队几小时；第二次叫醒实测也没用）
 STALE = 330          # 交还没交上（连不上 wxtest）且超过 wxtest 的单条上限（300 秒）：已被收回改派，本地这份作废，丢掉接着领
+WAIT_MAX = 510      # AI 回了稍等、报了要几分钟（wxtest 那边这条最多放宽到 480 秒，从领到算）：本地也照它报的放宽，最多这么久
 VIDEO_MAX, VIDEO_GRACE = 930, 180   # 处理员在等看懂视频（awx.py video 每轮刷新 .act，wxtest 那边同样放宽到 900 秒）：过期时限放宽
 
 def log(m):
@@ -57,11 +58,30 @@ def wake(tid, path):
 def shown(tid):   # inbox/.<ID>.shown：已经叫醒过几次（内容）、最后一次什么时候（mtime）
     return os.path.join(INBOX, f".{tid}.shown")
 
+def seen(tid):    # inbox/.<ID>.seen：处理员第一次跑 watch.py next 拿这条的时间（mtime），把「平台起会话」和「AI 干活」分开计时
+    return os.path.join(INBOX, f".{tid}.seen")
+
 def mark(tid):
     p = shown(tid)
     try: n = int(open(p).read() or 0)
     except (OSError, ValueError): n = 0
     open(p, "w").write(str(n + 1))
+
+def timing(tid, act0):
+    """这条任务各段用了几秒（交结论时带给 wxtest 记进 oplog 的 submit，看慢在哪）：wake=领到→hook/wake 叫醒，
+    think=叫醒→这次 act 开跑（处理员读任务、想；start=叫醒→处理员第一次跑 next，work=next→act），act=act 开跑→交结论，got=领到→交结论。读不到的段不报。"""
+    now = time.time()
+    try: got = os.path.getmtime(os.path.join(INBOX, f"{tid}.json"))
+    except OSError: return {}
+    out = {"got": round(now - got, 1), "act": round(now - act0, 1)}
+    try: woke = os.path.getmtime(shown(tid))
+    except OSError: woke = None
+    if woke is not None and got <= woke <= act0: out.update(wake=round(woke - got, 1), think=round(act0 - woke, 1))
+    try: saw = os.path.getmtime(seen(tid))
+    except OSError: saw = None
+    if woke is not None and saw is not None and woke <= saw <= act0:   # think = start（叫醒→处理员跑起来）+ work（跑起来→act）
+        out.update(start=round(saw - woke, 1), work=round(act0 - saw, 1))
+    return out
 
 def started(tid):  # inbox/.<ID>.act：act.py 已经开始处理这条（发过稍等、在查资料），值班不交还
     return os.path.join(INBOX, f".{tid}.act")
@@ -69,6 +89,18 @@ def started(tid):  # inbox/.<ID>.act：act.py 已经开始处理这条（发过�
 def begin(tid):
     try: open(started(tid), "w").close()
     except OSError as e: log(f"[watch] 记不下 {tid} 已开始：{e}")
+
+def ext(tid):   # inbox/.<ID>.ext：act.py 回了稍等、wxtest 答应放宽到的时刻（epoch 秒）
+    return os.path.join(INBOX, f".{tid}.ext")
+
+def extend(tid, left):
+    """wxtest 答应这条再占 left 秒：记下来，值班到点前不当它过期丢掉（多留 30 秒给 act 交结论）。"""
+    try: open(ext(tid), "w").write(str(int(time.time() + left + 30)))
+    except OSError as e: log(f"[watch] 记不下 {tid} 放宽时限：{e}")
+
+def ext_until(tid):
+    try: return float(open(ext(tid)).read().strip() or 0)
+    except (OSError, ValueError): return 0
 
 def busy(tid):   # .act 最近刷新过（awx.py video 还在等视频，或刚等完）
     try: return time.time() - os.path.getmtime(started(tid)) < VIDEO_GRACE
@@ -92,7 +124,7 @@ def stop(tid, why):
     if not tid or not os.path.exists(os.path.join(INBOX, f"{tid}.json")): return
     try: open(gone(tid), "w", encoding="utf-8").write(why or "已不归本机")
     except OSError as e: log(f"[watch] 记不下 {tid} 作废原因：{e}")
-    for p in (os.path.join(INBOX, f"{tid}.json"), shown(tid)):
+    for p in (os.path.join(INBOX, f"{tid}.json"), shown(tid), seen(tid)):
         try: os.remove(p)
         except OSError: pass
     log(f"[watch] {tid} 已不归本机，叫停：{why}")
@@ -121,7 +153,7 @@ def done(tid, read=True):
     if not read: pass
     elif _kind(os.path.join(INBOX, f"{tid}.json")) == "skill升级": read_ok("skill升级 已处理")
     elif _via() == tid: read_ok(f"附了改动原文的 {tid} 已处理")
-    for p in (os.path.join(INBOX, f"{tid}.json"), shown(tid), started(tid), gone(tid)):
+    for p in (os.path.join(INBOX, f"{tid}.json"), shown(tid), seen(tid), started(tid), gone(tid), ext(tid)):
         try: os.remove(p)
         except OSError: pass
 
@@ -284,7 +316,7 @@ def step(c):
             if r is not None:
                 log(f"[watch] {tid} 叫醒 {GIVEBACK} 秒处理员还没跑 act，已交还 wxtest 让别台接（{r.get('status') or r.get('error')}）；请查处理员为什么没处理")
                 return
-        if ago > STALE and not (busy(tid) and ago < VIDEO_MAX):
+        if ago > STALE and not (busy(tid) and ago < VIDEO_MAX) and not (ago < WAIT_MAX and time.time() < ext_until(tid)):
             log(f"[watch] {os.path.basename(p[0])} 超过 {STALE} 秒没处理完（wxtest 已收回改派），丢弃；请查处理员为什么没处理")
             done(p[0], read=False); return
         db.meta_set(c, "tick_at", str(int(time.time())))   # 手里有活，心跳别退
@@ -307,6 +339,9 @@ def main_next(hook=False):
         mark(tid)
     if p:
         tid = os.path.basename(p[0])[:-5]
+        if not hook and not os.path.exists(seen(tid)):   # 处理员第一次来拿：记下时间（只记第一次）
+            try: open(seen(tid), "w").close()
+            except OSError: pass
         t = {"id": tid, **json.load(open(p[0], encoding="utf-8"))}
         if not any(_kind(x) == "skill升级" for x in p):   # skill升级 被丢了还没读：改动原文附在这条里
             try:

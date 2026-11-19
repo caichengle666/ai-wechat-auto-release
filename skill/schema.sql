@@ -13,6 +13,11 @@ CREATE TABLE IF NOT EXISTS profile(
   sensitive   TEXT,                 -- 敏感点
   lang        TEXT,
   reply_when  TEXT,                 -- 群：mention 只回被@ / always / never
+  ask_kw      TEXT,                 -- 只对 TA 加的「只通知」关键字（叠在全局 ask_kw 后面）
+  tell_kw     TEXT,                 -- 只对 TA 加的「回并通知」关键字
+  reply_kw    TEXT,                 -- 只对 TA 加的「直接回」关键字
+  kw_off      TEXT,                 -- 全局关键字里对 TA 勾掉的，一行一条原文（三层共用）
+  red_off     TEXT,                 -- 全局红线里对 TA 勾掉的，一行一条原文
   rules       TEXT,                 -- 已废弃：专属规则改放 rules/<微信号>.md，旧值启动时自动搬过去
   locked      TEXT,                 -- 你手动改过、自动画像不许覆盖的字段，逗号分隔，如 'mode,risk'
   is_group    INTEGER DEFAULT 0,

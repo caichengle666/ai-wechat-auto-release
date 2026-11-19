@@ -4,7 +4,7 @@
 wxtest 已把微信里的事实整理好做成任务：合并连发、群里有没有叫到本人、本人在不在聊、语音转好文字、刷屏不叫。
 这里只做千人千面的那部分：按画像和规则决定回不回、整理资料；要回就输出 {"tasks": [...]}（只有事实字段，写法在 SKILL.md），
 Muse 写出 JSON 后执行任务里的 act 命令；不回就当场交回。设置一变就把只读过滤名单推给 wxtest。
-平时由 watch.py 循环调用。后台心跳 hb.py 自动拉起，只防掉线：单条领走 5 分钟没交 wxtest 照样收回；多个 agent 同时跑时 wxtest 按租约一条只派给一个。
+平时由 watch.py 循环调用。后台心跳 hb.py 自动拉起，只防掉线：单条领走 5 分钟没交 wxtest 照样收回（回了稍等报了 wait_min 的最多 8 分钟）；多个 agent 同时跑时 wxtest 按租约一条只派给一个。
 文件传输助手里本人发的管理命令、别人撤回消息、朋友圈评论、微信掉线/恢复、每晚日报也都是 wxtest 派的任务（掉线卡住它自己重启微信）；
 这里定措辞，掉线告警按 settings.json 的 alert 走 Bark/邮件/webhook/Muse。wxtest 本身连不上时这里自己报。"""
 import json, os, sys, time
@@ -412,7 +412,7 @@ def owner_task(cfg, t):
             "earlier": awx.transcript(earlier, me, cfg["me"] or cfg["title"], each=300, total=2000) if earlier else "",
             "act": f"python3 say.py {me}"}
 
-def _remember(c, chat, recent, cfg, voice=None, ask=(), new=(), rules="", tid=None):
+def _remember(c, chat, recent, cfg, voice=None, ask=(), new=(), rules="", tid=None, kw=None, red=None):
     """回的是哪条、对方说了什么、要不要用语音回（用谁的声音）、这次对方新发的是哪几条（要转发时转这些），留给 act.py，它就不用再读一遍消息。
     tid：这是哪条任务，act.py 只认 tid 对得上的 waited（整份重写，上一条任务的 waited 顺带清掉）。"""
     rid = next((m["id"] for m in reversed(recent) if m.get("sender_id") != cfg["me_id"]), None)
@@ -423,7 +423,7 @@ def _remember(c, chat, recent, cfg, voice=None, ask=(), new=(), rules="", tid=No
     fw = [[m["id"], ((m.get("content") if m.get("type") == 1 else m.get("voice_text")) or "")[:200]]   # 要转发时 AI 可从中挑几条（act.pick_ids）
           for m in new if m.get("sender_id") != cfg["me_id"] and not m.get("ai") and m.get("type") not in (10000, 50)]
     db.meta_set(c, "task:" + chat, json.dumps({"rid": rid, "said": said, "voice": voice, "ask": list(ask), "qs": qs, "fw": fw,
-                                              "rules": rules, "tid": tid}, ensure_ascii=False))
+                                              "rules": rules, "tid": tid, **({"kw": kw} if kw else {}), **({"red": 1} if red else {})}, ensure_ascii=False))
 
 def _unwait(c, chat):
     """这个聊天的新任务不回（skip）：清掉上一条任务留下的 waited，免得旧任务号重跑 act 时被当成回过稍等。"""
@@ -456,8 +456,12 @@ def _build(c, chat, name, cfg, recent, new, tags=(), remark=None, called=False):
          "person": who, "context": context, "act": f"python3 act.py {chat}" + ("" if ok else " --media")}
     if prof["is_group"]:
         t["my_names"] = cfg["names"]
-    if cfg["redlines"]:
-        t["redlines"] = cfg["redlines"]
+    if red := rr.redlines(prof, cfg):        # 只给对 TA 生效的红线（本人在联系人卡片里勾掉的不算）
+        t["redlines"] = "\n".join(red)
+        t["_red"] = 1                        # act.py 只认给过红线的任务里 AI 标的 red
+    if kws := rr.keywords(prof, cfg):        # 对 TA 生效的三层关键字：AI 按意思判断说到哪层，act.py 按层办（只认这里给过的层）
+        t["keywords"] = kws
+        t["_kwt"] = kws
     if ok and (tools := mcp.brief()):        # 本人接的外部工具：能查到更准答案的事先查再回
         t["tools"] = tools
     if ok:                                  # 更早的聊天：照本人以前怎么跟 TA 聊来回，知道前因后果
@@ -487,7 +491,8 @@ def _build(c, chat, name, cfg, recent, new, tags=(), remark=None, called=False):
         if t["voice"]: t["spoken"] = voices.brief(cfg, t["voice"])   # 有这个字段（哪怕是空的）= 回复会念成语音
     vids = [] if prof["is_group"] or not ok else rr.videos(new, cfg)
     if vids:                                # 单聊发视频（含视频号）：先听完再聊内容（本人 11-03 定，群里不做）
-        t["videos"] = [{"id": i, "cmd": f"python3 awx.py video {chat} {i}"} for i in vids[-2:]]
+        pre = awx.video_prefetch(chat, vids[-2:])   # 叫醒前先替 AI 看：做完的直接给答案，省一轮命令和等待
+        t["videos"] = [dict({"id": i}, **pre[i]) if i in pre else {"id": i, "cmd": f"python3 awx.py video {chat} {i}"} for i in vids[-2:]]
     if ok:                                  # 对方发了文件：取原文件给 Muse 自己打开读
         files = awx.attach_files(new, chat)
         if files:
@@ -638,7 +643,7 @@ def run(c, cfg):
         awx.task_done(t["id"], {"result": {"action": "none"}, **notes()} if NOTES else {"skip": "不用回"})
         return
     _remember(c, chat, recent, cfg, task.pop("voice", None), task.pop("_ask", ()), new, (task.get("person") or {}).get("rules") or "",
-              tid=t["id"])
+              tid=t["id"], kw=task.pop("_kwt", None), red=task.pop("_red", None))
     task["act"] += f" --task {t['id']}"
     print(json.dumps({"tasks": [task]}, ensure_ascii=False))
 

@@ -1,20 +1,69 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""回复规则：该不该回、整理这个人的资料、按「风险 × 意图」决定直发/草稿/不回。
-所有人名、称呼、备注、套话、红线都来自 cfg（db.config，安装时问用户填的）。"""
+"""回复规则：该不该回、整理这个人的资料、按意图决定直发/草稿/转告本人。
+所有人名、称呼、备注、红线都来自 cfg（db.config，安装时问用户填的）。"""
 from collections import Counter
+import re, unicodedata
 import awx
 
 
 # 保密、群聊公共场合、禁区、意图分类、输出格式这些固定规矩写在 SKILL.md「写回复的规矩」，不进任务包：
 # 任务包里一大段命令口吻的说明会被 Muse 平台安全检查当成外部内容夹带指令拦下（11-05 对照试验：带说明 4/4 拦，不带 0/9）。
 
-# 画像风险 × 消息意图 → 动作：auto 直发 / hold 回套话并通知 / draft 存草稿并通知 / notify 不回只通知
-TABLE = {   # 默认风险表；本人可在 settings.json 的 policy 改单个格子
-    "low":  {"chat": "auto",  "tech": "auto", "price": "hold", "business": "hold",  "sensitive": "notify"},
-    "mid":  {"chat": "auto",  "tech": "auto", "price": "hold", "business": "draft", "sensitive": "notify"},
-    "high": {"chat": "draft", "tech": "auto", "price": "hold", "business": "draft", "sensitive": "notify"},
-}
+# 发不发由 AI 定（本人 11-18 定）：AI 写了回复就发，没写就不发并通知本人；敏感一律不回、转告本人。
+# 价格不再写死转本人（本人 11-19 定：不是每个用户都做生意）：能不能谈价格看用户自己写的红线。
+# 红线管 AI 自己说出去的话（本人 11-19 09:55 定）：碰到红线 AI 照样回，只是不越线（婉拒、拖一拖、说要问本人），结论标 red；
+# 实在不越线就回不了才留空 → 转告本人。守着红线回的敏感事也照发，发完告诉本人。
+ASK_OWNER = ("sensitive",)
+
+# 红线和关键字（本人 11-19 定：用户自己写，代码不带默认；不是每个用户都做生意）。都交给 AI 按意思判断，代码不对字面。
+# 红线：全局一行一条（换行或分号隔开）。联系人卡片里勾掉的几条（profile.red_off，一行一条原文）对 TA 不算；任务包里只给 TA 实际生效的，千人千面。
+# 关键字三层（只通知 ask_kw / 回并通知 tell_kw / 直接回 reply_kw）：任务包 keywords 里只放对 TA 生效的，AI 看对方说到哪层的事，
+# 结论里标 kw（同时说到几层按最保守的：ask ＞ tell ＞ reply），act.py 照层办：ask 不发、转本人；tell 发完告诉本人；reply 发了不打扰。
+# 没带的层 = 对 TA 不设，照默认（AI 自己定，正事/问价回完告诉本人，敏感/看不懂转本人）。
+# 写法：逗号/顿号/分号/换行隔开；「价格+多少」= 两件都说到才算（给 AI 看的写法）。
+# 联系人卡片：勾掉全局的几个（profile.kw_off，三层共用，一行一条原文；比对不看空格标点、全半角）+ 只对 TA 加的（profile 同名列，叠在全局后面）。
+KW_MAX = 50
+TIERS = (("ask_kw", "ask"), ("tell_kw", "tell"), ("reply_kw", "reply"))   # 从保守到宽松
+_KW_SEP = re.compile(r"[,，、;；\n]+")
+_RL_SEP = re.compile(r"[\n;；]+")
+_KW_JUNK = re.compile(r"[\W_]+")
+_KW_END = " \t\u3000。.！!？?～~…"
+KW_OFF = ("无", "不用", "none", "off")       # 卡片里填这些 = 不给 TA 加（不会当成关键字「无」）
+
+def _kw_norm(s):
+    return _KW_JUNK.sub("", unicodedata.normalize("NFKC", s or "").lower())
+
+def kw_items(text, cap=KW_MAX):
+    """'多少钱，报价、价格 + 多少' → ['多少钱', '报价', '价格+多少']；原样保留给 AI 看，去重（不看空格标点），最多 KW_MAX 条。"""
+    if (text or "").strip().lower() in KW_OFF:
+        return []
+    out, seen = [], set()
+    for part in _KW_SEP.split(text or ""):
+        w = "+".join(x.strip(_KW_END) for x in part.replace("＋", "+").split("+") if x.strip(_KW_END))   # 两头的句号问号空格去掉（「问价格。」→「问价格」）
+        if _kw_norm(w) and _kw_norm(w) not in seen:
+            seen.add(_kw_norm(w)); out.append(w)
+    return out[:cap] if cap else out
+
+def kw_list(prof, cfg, key="ask_kw"):
+    """这一层对这个人实际生效的关键字：全局的去掉卡片里勾掉的，再加上只对 TA 加的。"""
+    off = {_kw_norm(x) for x in kw_items(prof.get("kw_off"), None)}
+    rules = [r for r in kw_items(cfg.get(key)) if _kw_norm(r) not in off]
+    have = {_kw_norm(r) for r in rules}
+    return rules + [r for r in kw_items(prof.get(key)) if _kw_norm(r) not in have]
+
+def keywords(prof, cfg):
+    """任务包 keywords：{层: [对 TA 生效的关键字]}，空的层不放；全空 = {}。"""
+    return {tier: w for key, tier in TIERS if (w := kw_list(prof, cfg, key))}
+
+def redline_items(text):
+    """红线一行一条（分号也算分行），去重，原样保留。"""
+    return list(dict.fromkeys(x.strip() for x in _RL_SEP.split(text or "") if x.strip()))
+
+def redlines(prof, cfg):
+    """对这个人实际生效的红线：全局的去掉卡片里勾掉的（比对时不看空格标点、全半角）。"""
+    off = {_kw_norm(x) for x in redline_items(prof.get("red_off"))}
+    return [x for x in redline_items(cfg.get("redlines")) if _kw_norm(x) not in off]
 
 def _owner(m, cfg):
     """本人亲自发的：本人号上、不是 wxtest 那台发的（消息不带 ai；wxtest 按微信库来源字段标，不看内容）。"""
@@ -93,23 +142,20 @@ def intent_of(x):
     s = str(x or "").strip().lower()
     return ALIAS.get(s, s)
 
-def decide(prof, intent, reply, cfg):
-    """返回 (动作, 正文)。动作：auto / draft / notify / skip。unclear 和认不出的意图转告本人，绝不悄悄丢掉。"""
+def decide(prof, intent, reply, cfg, kw=None, red=False):
+    """返回 (动作, 正文)。动作：auto / draft / notify / skip。unclear 和认不出的意图转告本人，绝不悄悄丢掉。
+    kw：AI 判断对方说到了本人设的哪层关键字。ask 只通知：不发、转本人；tell / reply：本人允许回这类话，
+    AI 判成敏感也照发（红线由 AI 守，越线它会留空）。
+    red：AI 碰到红线、守着红线写了回复（婉拒/拖/说要问本人），敏感的也照发（act.py 发完告诉本人）。"""
+    if kw == "ask":
+        return "notify", ""
     intent = intent_of(intent)
     if intent not in INTENTS:
         if intent != "unclear":
             print(f"[intent] 认不出的意图「{intent[:20]}」，没回，转告本人", flush=True)
         return "notify", ""
-    risk = prof.get("risk") if prof.get("risk") in TABLE else "high"
-    act = cfg.get("policy", {}).get((risk, intent)) or TABLE[risk][intent]   # 本人在 policy 里改过的格子优先
-    if act == "hold":                     # 套话也算发出去的话：只存草稿的人（草稿<名>）和全局试运行一样只存草稿
-        if prof.get("mode") == "draft" or cfg["rollout"] != "auto":
-            return "draft", cfg["hold"]
-        return "auto", cfg["hold"]
-    if act == "notify":
+    if (intent in ASK_OWNER and kw not in ("tell", "reply") and not red) or not reply:  # 敏感转本人（本人设了能回的关键字、守着红线回的除外）；AI 没写回复也告诉本人
         return "notify", ""
-    if not reply:
-        return "skip", ""
-    if act == "auto" and (prof.get("mode") == "draft" or cfg["rollout"] != "auto"):
-        act = "draft"
-    return act, reply
+    if prof.get("mode") == "draft":   # 只存草稿的人（草稿<名>）
+        return "draft", reply
+    return "auto", reply

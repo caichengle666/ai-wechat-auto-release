@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """SQLite 存取：画像、游标、草稿。所有东西一个库文件，不存聊天记录。"""
-import sys, json, os, sqlite3, time
+import json, os, sqlite3, time
 
 PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.environ.get("AWX_DB", "store.db"))   # 相对路径按本目录算，不随调用者的当前目录变（否则会在别处建空库）
 FIELDS = ("relation", "risk", "mode", "tone", "style", "address",
-          "topics", "sensitive", "lang", "reply_when")
+          "topics", "sensitive", "lang", "reply_when", "ask_kw", "tell_kw", "reply_kw", "kw_off", "red_off")
 # AI 自动画像（act.py 交来的 profile）只能写这些；mode / reply_when / lang 是本人的设置，只能由文件传输助手命令（set_rule）、控制面板改
 AI_FIELDS = ("relation", "risk", "tone", "style", "address", "topics", "sensitive")
 RISKS = ("low", "mid", "high")
@@ -13,8 +13,8 @@ RELATIONS = ("家人", "朋友", "同行", "客户", "供应商", "员工", "陌
 RULES = os.environ.get("AWX_RULES") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "rules")
 RULES_MAX = 2000
 # settings.json 里能填的项（seed.py 写进 meta）；新增设置要同时加进这里、settings.example.json、docs/settings.md、config()
-SETTING_KEYS = ("me", "title", "names", "sign", "voice_sign", "hold", "redlines", "notify_to", "rollout", "me_id", "draft_wait", "alert", "agent", "vision", "recall",
-                "handoff_min", "merge_sec", "per_hour", "report_hour", "bot_mute_min", "pending_max_min", "sns", "friend", "card", "digest", "label_top", "label_rel", "label_mine", "pat", "like", "like_every", "catchup_min", "voice_reply", "voice_by", "voice_roles", "wake", "sync_min", "policy")
+SETTING_KEYS = ("me", "title", "names", "sign", "voice_sign", "redlines", "ask_kw", "tell_kw", "reply_kw", "notify_to", "me_id", "draft_wait", "alert", "agent", "vision", "recall",
+                "handoff_min", "merge_sec", "per_hour", "report_hour", "bot_mute_min", "pending_max_min", "sns", "friend", "card", "digest", "label_top", "label_rel", "label_mine", "pat", "like", "like_every", "catchup_min", "voice_reply", "voice_by", "voice_roles", "wake", "sync_min")
 LOCAL_KEYS = ("agent", "wake", "vision")    # 各机自己的（名字、唤醒命令、模型能不能看图），不同步；其余几台共用，走画像同步
 SYSTEM = ("newsapp", "filehelper", "qqmail", "fmessage", "medianote", "floatbottle", "weixin",
           "notifymessage", "brandsessionholder", "*default*")
@@ -31,7 +31,7 @@ def init(c):
         c.execute("ALTER TABLE cursor ADD COLUMN ts INTEGER")
     c.execute("DROP TABLE IF EXISTS pending")      # 发不出去的重试已交给 wxtest
     have = {r["name"] for r in c.execute("PRAGMA table_info(profile)")}
-    for col in ("risk", "style", "topics", "sensitive", "locked", "profiled_at"):
+    for col in ("risk", "style", "topics", "sensitive", "locked", "profiled_at", "ask_kw", "tell_kw", "reply_kw", "kw_off", "red_off"):
         if col not in have:   # 旧库补列
             c.execute(f"ALTER TABLE profile ADD COLUMN {col} {'INTEGER' if col == 'profiled_at' else 'TEXT'}")
     for r in c.execute("SELECT chat, rules FROM profile WHERE rules IS NOT NULL AND rules != ''").fetchall():
@@ -104,10 +104,10 @@ def config(c):
         "names": sorted(set(names + [g("me"), title]) - {""}),     # 群里算“叫到我”的名字
         "sign": off(tt(g("sign", f"【{title}的私人助理·自动回复】"))),
         "voice_sign": off(tt(g("voice_sign"))),   # 没填 = 不念
-        "hold": tt(g("hold", f"这事我做不了主，等{title}本人回你。")),
-        "redlines": g("redlines"),                       # 用户自己填，空 = 不加这一行
+        "redlines": g("redlines"),                       # 用户自己填，一行一条，空 = 没有（对某人生效的见 reply_rules.redlines）
+        # 关键字三层，用户自己填，空 = 不用（规则见 reply_rules）：只通知 / 回并通知 / 直接回
+        "ask_kw": g("ask_kw"), "tell_kw": g("tell_kw"), "reply_kw": g("reply_kw"),
         "notify_to": meta(c, "notify_to", "filehelper"),   # 只有它允许设成空串（=只打日志）
-        "rollout": g("rollout", "auto"),
         # 用户可调的时长/数量（含义和场景见 docs/settings.md），没填或填错用默认
         "draft_wait": num("draft_wait", 3), "handoff_min": num("handoff_min", 5),
         "merge_sec": num("merge_sec", 5), "per_hour": num("per_hour", 40), "report_hour": num("report_hour", 21),
@@ -130,23 +130,8 @@ def config(c):
         "voice_by": _list(g("voice_by")),                     # 标签=声音，没列的用本人声音 default；本人自己填
         "voice_roles": _list(g("voice_roles")),      # 非本人声音=人名:昵称，结尾自报「私人助手昵称」；本人自己登记
         "catchup_min": num("catchup_min", 30),                        # 晚到多少分钟的消息算补收（不回、只汇总通知本人）
-        "policy": _policy(g("policy")),                              # 改风险表的格子「high.chat=auto,mid.business=hold」，没写的用默认表
     }
 
-POLICY_ACTS = ("auto", "draft", "hold", "notify")
-POLICY_INTENTS = ("chat", "tech", "price", "business", "sensitive")
-
-def _policy(v):
-    """「风险.意图=动作」逗号分隔 → {(风险, 意图): 动作}；写错的格子跳过并打日志。"""
-    out = {}
-    for item in _list(v):
-        k, _, act = item.partition("=")
-        risk, _, intent = k.strip().partition(".")
-        if risk in ("low", "mid", "high") and intent in POLICY_INTENTS and act.strip() in POLICY_ACTS:
-            out[(risk, intent)] = act.strip()
-        else:
-            print(f"[settings] policy 这一格写错了，跳过：{item[:40]}", file=sys.stderr)
-    return out
 
 def meta_set(c, k, v):
     c.execute("INSERT INTO meta(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v", (k, v))

@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """朋友圈：wxtest 派来的「有人评论/回复本人」任务（tick.py 调 task()），以及本人让你操作朋友圈时的一条命令。
-设置 sns：notify（默认）把评论告诉本人；reply 由 AI 以助理身份回复评论（按风险表，只回闲聊和技术，正事转本人）；off 不管。
+设置 sns：notify（默认）把评论告诉本人；reply 由 AI 以助理身份回复评论（只回闲聊和技术，其余转本人）；off 不管。
 朋友圈是公共场合，好友都看得见，所以回复按群聊的规矩来；每条回复由wxtest强制加备注。
 
 本人让你操作朋友圈时只跑一条命令（内容从标准输入给，heredoc）：
   python3 sns.py list [条数]                 本人最近的朋友圈和评论、点赞（看 tid、评论 id）
   python3 sns.py of <微信号> [条数]          某个好友最近的朋友圈（微信号是 wxid_… 那种 id）
   python3 sns.py image <tid> [第几张]         把那条朋友圈的图存到本地并打印路径（从 1 数，不写=全部，最多 9 张；视频是封面），打开文件看
-  python3 sns.py video <tid> [问题]           看懂那条朋友圈里的视频（好友自己上传的；转发的视频号看不了，只有封面），打印答案或画面目录
-  python3 sns.py post <<'EOF' … EOF          发朋友圈（只发本人明确指定的内容）
+  python3 sns.py video <tid> [问题]           看懂那条朋友圈里的视频（好友自己上传的，或转发的视频号；视频号直播看不了），打印答案或画面目录
+转发的文章、链接：list/of 会打印「链接：…」，读正文跑 python3 awx.py article <链接>。
+  python3 sns.py post [图或视频的本地路径…] <<'EOF' … EOF   发朋友圈（只发本人明确指定的内容）：图最多 9 张或 1 个视频，
+                                             文件从本机传给 wxtest；只发图不写字时不用 heredoc
   python3 sns.py reply <tid> <评论id> <<'EOF' … EOF   回复本人朋友圈下的某条评论
   python3 sns.py comment <tid> <<'EOF' … EOF  在本人的朋友圈下评论
   python3 sns.py delete <tid>                删除本人的一条朋友圈
 回复、评论、删除只能操作本人最近三天的朋友圈（电脑版微信只列这些）；没文字的只支持纯图片。"""
-import sys, time
+import base64, os, sys, time
 import awx, db, reply_rules as rr
 
 def _ago(t):
@@ -25,7 +27,8 @@ def thread(feed, cfg, upto=None):
     me = cfg["me"] or cfg["title"]
     who = lambda u, n: me if u == cfg["me_id"] else n
     lines = [f"{who(feed['user'], feed['name'])} 发的朋友圈（{_ago(feed.get('time'))}）：{feed.get('text') or '[无文字]'}"
-             + (f" [{feed['kind']}×{feed['media']}]" if feed.get("media") else "")]
+             + (f" [{feed['kind']}×{feed['media']}]" if feed.get("media") else "")
+             + (f" 分享：{feed['title']}" if feed.get("title") else "")]
     if feed.get("likes"):
         lines.append("点赞：" + "、".join(who(x["user"], x["name"]) for x in feed["likes"]))
     names = {c["id"]: who(c["user"], c["name"]) for c in feed.get("comments", [])}
@@ -54,7 +57,7 @@ def task(c, cfg, t, say):
             say(cfg, note)
         return None
     return {"kind": "朋友圈评论", "chat": n["user"], "alias": n.get("name"), "title": cfg["title"], "comment_id": n["comment_id"],
-            "person": brief(prof, n), **({"redlines": cfg["redlines"]} if cfg["redlines"] else {}),
+            "person": brief(prof, n), **({"redlines": "\n".join(red)} if (red := rr.redlines(prof, cfg)) else {}),
             "context": thread(feed, cfg, n["comment_id"]),
             **({"images": imgs} if (imgs := [{"id": i + 1, "path": p} for i, p in enumerate(awx.moment_images(feed))]) else {}),
             "act": f"python3 act.py {n['user']} --sns {feed['tid']}:{n['comment_id']} --task {t['id']}"}
@@ -84,7 +87,7 @@ def decide(c, chat, tid, cid, data, cfg):
     if replied(feed, cid, cfg["me_id"]):
         return {"result": {"action": "skip", "intent": intent, "why": "已回过"}}
     act, text = rr.decide(prof, intent, text, cfg)
-    if intent not in ("chat", "tech") or act in ("notify", "skip") or text == cfg["hold"]:
+    if intent not in ("chat", "tech") or act in ("notify", "skip"):
         act = "skip" if intent in ("chat", "tech") else "notify"   # 正事、unclear、认不出的都转告本人
     out = {"result": {"action": act, "intent": intent}}
     if act == "auto":
@@ -99,8 +102,10 @@ def decide(c, chat, tid, cid, data, cfg):
 def _show(feeds, cfg):
     for f in feeds:
         print(f"tid={f['tid']}  {f.get('name', '')}  {_ago(f.get('time'))}  {f.get('text') or '[无文字]'}"
-              + (f"  [{'视频' if f.get('kind') == 'video' else '图'}×{f['media']}]" if f.get("media") else "")
+              + (f"  [{'视频' if f.get('kind') == 'video' else '封面' if f.get('kind') in ('finder', 'live') else '图'}×{f['media']}]" if f.get("media") else "")
               + (f"  分享：{f['title']}" if f.get("title") else ""))
+        if f.get("url"):
+            print(f"  链接：{f['url']}（读正文：python3 awx.py article <链接>）")
         if f.get("likes"):
             print("  赞：" + "、".join(x["name"] for x in f["likes"]))
         for x in f.get("comments", []):
@@ -114,6 +119,25 @@ def _run(path, body, wait=240):
     ok = bool(r.get("ok"))
     print(("成功：" if ok else "没成功：") + str(r.get("status") or r.get("error")))
     sys.exit(0 if ok else 1)
+
+IMG = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp")
+VID = (".mp4", ".mov", ".m4v")
+
+def _files(paths):
+    """post 带的本地文件 → [{"filename", "file_b64"}]：图最多 9 张，或者只有 1 个视频；读不到、格式不认的直接报错，一张都不发。"""
+    if not paths: return []
+    exts = [os.path.splitext(p)[1].lower() for p in paths]
+    bad = [p for p, e in zip(paths, exts) if e not in IMG + VID]
+    if bad: raise SystemExit("只能发图片或视频：" + "、".join(bad))
+    if any(e in VID for e in exts) and len(paths) > 1: raise SystemExit("视频只能单独发 1 个，不能和图或别的视频一起")
+    if len(paths) > 9: raise SystemExit(f"图最多 9 张，给了 {len(paths)} 张")
+    out = []
+    for p in paths:
+        try: raw = open(p, "rb").read()
+        except OSError as e: raise SystemExit(f"读不了 {p}：{e}")
+        if not raw: raise SystemExit(f"{p} 是空文件")
+        out.append({"filename": os.path.basename(p), "file_b64": base64.b64encode(raw).decode()})
+    return out
 
 def main():
     a = sys.argv[1:]
@@ -135,17 +159,20 @@ def main():
         return
     if a[0] == "video" and len(a) >= 2:
         feed = (awx.api(f"/moments?tid={awx.quote(a[1])}").get("feeds") or [None])[0]
-        if not feed or feed.get("kind") != "video":
-            raise SystemExit("这条是转发的视频号，看不了视频本身（sns.py image 看封面）" if feed and feed.get("kind") == "finder" else "这条朋友圈没有视频")
+        if not feed or feed.get("kind") not in ("video", "finder"):
+            raise SystemExit("这条是转发的视频号直播，看不了（sns.py image 看封面）" if feed and feed.get("kind") == "live" else "这条朋友圈没有视频")
         return awx.video_answer(f"/moments/video/ask?tid={awx.quote(feed['tid'])}&i=0&q={awx.quote(' '.join(a[2:]))}&wait=55", feed["tid"])
     if a[0] == "delete":
         if len(a) != 2: raise SystemExit(__doc__)
         return _run("/moments/delete", {"tid": a[1]})
+    if a[0] == "post":
+        files = _files(a[1:])
+        text = "" if sys.stdin.isatty() else sys.stdin.read().strip()
+        if not text and not files: raise SystemExit("内容是空的：文字和图至少要有一样")
+        return _run("/moments", {"text": text, "files": files})
     text = sys.stdin.read().strip()
     if not text:
         raise SystemExit("内容是空的")
-    if a[0] == "post":
-        return _run("/moments", {"text": text})
     if a[0] == "reply" and len(a) == 3 and a[2].isdigit():
         return _run("/moments/comment", {"tid": a[1], "reply_to": int(a[2]), "text": text})
     if a[0] == "comment" and len(a) == 2:

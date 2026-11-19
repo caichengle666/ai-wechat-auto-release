@@ -46,7 +46,10 @@ def _build(here=None):
     try: docs = ["docs/" + x for x in os.listdir(os.path.join(here, "docs")) if x.endswith(".md")]
     except OSError: docs = []
     for f in sorted(x for x in top + docs if os.path.isfile(os.path.join(here, x))):
-        try: h.update(f.encode() + b"\0" + open(os.path.join(here, f), "rb").read())
+        try:
+            with open(os.path.join(here, f), "rb") as src:
+                text = src.read().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+            h.update(f.encode() + b"\0" + text)
         except OSError as e: print(f"[awx] 算代码指纹读 {f} 失败：{e}", file=sys.stderr, flush=True)
     return h.hexdigest()[:8]
 
@@ -199,6 +202,14 @@ def task_check(tid):
         return r if isinstance(r, dict) and "mine" in r else None
     except Exception as e:
         print(f"[task] 查 {tid} 状态失败：{str(e)[:80]}", file=sys.stderr, flush=True)
+
+def task_extend(tid, mins):
+    """回了稍等去查资料：告诉 wxtest 这条还要几分钟，别按 5 分钟收回（最多放宽到 8 分钟，从领到算）。
+    成功回 {"ok": true, "left": 剩几秒}；409 回现状；网络错误或 wxtest 太旧回 None（照旧按 5 分钟算）。"""
+    try:
+        return _post(f"/task/{tid}", {"extend": mins}, 20)
+    except Exception as e:
+        print(f"[task] {tid} 放宽时限失败：{str(e)[:80]}", file=sys.stderr, flush=True)
 
 def task_done(tid, body):
     """把任务结论交回 wxtest；租约已被收回（409）或网络错误都不要紧，wxtest 会再派。
@@ -393,7 +404,7 @@ def moment_image(tid, i=0, thumb=False):
 
 def moment_images(feed, limit=3):
     """一条朋友圈里的图（视频取封面），最多 limit 张：[路径]；拿不到的跳过。"""
-    if feed.get("kind") not in ("image", "video", "finder"): return []
+    if feed.get("kind") not in ("image", "video", "finder", "live"): return []
     return [p for p in (moment_image(feed["tid"], i) for i in range(min(int(feed.get("media") or 0), limit))) if p]
 
 def _img_get(name, path):
@@ -444,14 +455,85 @@ def file(chat, mid):
     os.replace(p + ".tmp", p)
     return p, ""
 
+TEXT_MAX = 8000   # 文件抽出的文字最多放这么多字进任务包（超了标 text_cut，要全文 AI 再自己打开 path）
+
+def _xml_text(z, name):
+    import xml.etree.ElementTree as ET
+    return ET.fromstring(z.read(name))
+
+def _docx_text(path):
+    """Word：段落一行一段，表格一行一行、格子用 tab 隔开。"""
+    import zipfile
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    with zipfile.ZipFile(path) as z: body = _xml_text(z, "word/document.xml").find(W + "body")
+    out = []
+    for el in (body if body is not None else []):
+        if el.tag == W + "p": out.append("".join(t.text or "" for t in el.iter(W + "t")))
+        elif el.tag == W + "tbl":
+            for tr in el.iter(W + "tr"):
+                out.append("\t".join("".join(t.text or "" for t in tc.iter(W + "t")) for tc in tr.iter(W + "tc")))
+    return "\n".join(x for x in out if x.strip())
+
+def _xlsx_text(path):
+    """Excel：每张表一段「【表名】」，一行一行、格子用 tab 隔开，数字照原样（公式取算好的值）。"""
+    import zipfile, re as _re
+    S = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+    with zipfile.ZipFile(path) as z:
+        names = set(z.namelist())
+        shared = [ "".join(t.text or "" for t in si.iter(S + "t")) for si in _xml_text(z, "xl/sharedStrings.xml").iter(S + "si")] if "xl/sharedStrings.xml" in names else []
+        rels = {r.get("Id"): r.get("Target") for r in _xml_text(z, "xl/_rels/workbook.xml.rels")} if "xl/_rels/workbook.xml.rels" in names else {}
+        out = []
+        for sh in _xml_text(z, "xl/workbook.xml").iter(S + "sheet"):
+            tgt = rels.get(sh.get(R + "id"), "")
+            f = "xl/" + tgt.lstrip("/").removeprefix("xl/") if tgt else ""
+            if f not in names: continue
+            out.append(f"【{sh.get('name')}】")
+            for row in _xml_text(z, f).iter(S + "row"):
+                cells = {}
+                for c in row.iter(S + "c"):
+                    col = _re.match(r"[A-Z]+", c.get("r") or "A"); n = 0
+                    for ch in (col.group() if col else "A"): n = n * 26 + ord(ch) - 64
+                    v, t = c.find(S + "v"), c.get("t")
+                    if t == "inlineStr": x = "".join(e.text or "" for e in c.iter(S + "t"))
+                    elif v is None or v.text is None: continue
+                    elif t == "s": x = shared[int(v.text)] if v.text.isdigit() and int(v.text) < len(shared) else ""
+                    else: x = v.text
+                    cells[n] = x
+                if cells: out.append("\t".join(cells.get(i, "") for i in range(1, max(cells) + 1)))
+    return "\n".join(out)
+
+def file_text(path):
+    """文件里的文字（Word/Excel/纯文本类，有 pdftotext 时还有 PDF），派任务时先抽好放进包里，AI 不用再打开一轮。扫描件、图片、压缩包等抽不了返回空。"""
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        if ext == ".docx": return _docx_text(path)
+        if ext == ".xlsx": return _xlsx_text(path)
+        if ext == ".pdf":   # 机器上有 poppler 的 pdftotext 才抽（保留版面对齐，表格列不乱）；没有就让 AI 自己打开
+            if not shutil.which("pdftotext"): return ""
+            r = subprocess.run(["pdftotext", "-layout", "-enc", "UTF-8", path, "-"], capture_output=True, timeout=30)
+            return r.stdout.decode("utf-8", "replace").replace("\f", "\n") if r.returncode == 0 else ""
+        if ext in (".txt", ".csv", ".md", ".json", ".log", ".tsv"):
+            raw = open(path, "rb").read(TEXT_MAX * 4)
+            for enc in ("utf-8-sig", "gb18030"):
+                try: return raw.decode(enc)
+                except UnicodeDecodeError: pass
+    except Exception as e:
+        print(f"[file] 抽文字失败 {os.path.basename(path)}：{e}", file=sys.stderr)
+    return ""
+
 def attach_files(msgs, chat, limit=2):
-    """新消息里的文件：[{id, name, path 或 error}]，最新的优先，最多 limit 个。"""
+    """新消息里的文件：[{id, name, path 或 error, text}]，最新的优先，最多 limit 个。Word/Excel/文本抽好文字放 text（超长截断标 text_cut）。"""
     out = []
     for m in reversed(msgs):
         if m.get("type") != 49 or m.get("app") != 6:
             continue
         p, why = file(chat, m["id"])
-        out.append({"id": m["id"], "name": m.get("content") or "", **({"path": p} if p else {"error": why})})
+        f = {"id": m["id"], "name": m.get("content") or "", **({"path": p} if p else {"error": why})}
+        if p and (txt := file_text(p).strip()):
+            f["text"] = txt[:TEXT_MAX]
+            if len(txt) > TEXT_MAX: f["text_cut"] = True
+        out.append(f)
         if len(out) >= limit:
             break
     return list(reversed(out))
@@ -567,12 +649,39 @@ def video_answer(p, tag, busy=lambda: None):
         sys.exit(f"没看成：{e.read().decode(errors='replace') if e.fp else e.msg}")
     if "state" in r: sys.exit("还没处理完，过几分钟再跑一次")
     if r.get("speech") is False:   # 没人声：画面存成图，Muse 自己看图脑补
-        import base64, tempfile
-        d = tempfile.mkdtemp(prefix=f"awx-video-{tag}-")
-        for f in r.get("frames", []):
-            t = int(f["t"]); open(os.path.join(d, f"{t // 60:02d}m{t % 60:02d}s.jpg"), "wb").write(base64.b64decode(f["b64"]))
+        d = _frames_dir(r, tag)
         print(f"这条视频没人声，时长 {r.get('duration')} 秒，按时间截了 {len(r.get('frames', []))} 张画面（文件名=第几分几秒），自己看图判断讲了什么：{d}")
     else: print(r.get("answer"))
+
+def _frames_dir(r, tag):
+    """没人声的视频：截好的画面存进临时目录（文件名=第几分几秒），返回目录。"""
+    import base64, tempfile
+    d = tempfile.mkdtemp(prefix=f"awx-video-{tag}-")
+    for f in r.get("frames", []):
+        t = int(f["t"]); open(os.path.join(d, f"{t // 60:02d}m{t % 60:02d}s.jpg"), "wb").write(base64.b64decode(f["b64"]))
+    return d
+
+VIDEO_PRE = 45   # 派任务前最多替 AI 等这么久看懂视频；没等到的照旧给命令（wxtest 后台接着做，AI 再跑命令直接拿结果）
+
+def video_prefetch(chat, ids, budget=VIDEO_PRE):
+    """派任务前先把视频交给 wxtest 看（几条同时开工），在 budget 秒内做完的直接给答案：
+    {id: {"answer": 讲了什么} 或 {"frames": 画面目录, "duration": 秒}}；没做完、出错的不在里面（AI 照旧跑命令）。"""
+    got, end = {}, time.time() + budget
+    todo = list(ids)
+    while todo and time.time() < end:
+        for i in list(todo):
+            left = end - time.time()
+            if left <= 0: break
+            try: r = api(f"/video/ask?chat={quote(chat)}&id={i}&q=&wait={int(min(25, left)) if len(todo) == 1 else 0}",
+                         timeout=70, tries=1)
+            except Exception as e:
+                print(f"[video] 预先看 {i} 没成：{e}", file=sys.stderr); todo.remove(i); continue
+            if "state" in r: continue
+            todo.remove(i)
+            if r.get("speech") is False: got[i] = {"frames": _frames_dir(r, str(i)), "duration": r.get("duration")}
+            elif r.get("answer"): got[i] = {"answer": r["answer"]}
+        if todo and len(todo) > 1: time.sleep(3)
+    return got
 
 if __name__ == "__main__":     # 给 Muse 用的命令行：查更早的聊天、看公众号文章
     cmd = sys.argv[1:2]
